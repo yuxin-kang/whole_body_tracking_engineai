@@ -32,8 +32,52 @@ def export_motion_policy_as_onnx(
 ):
     if not os.path.exists(path):
         os.makedirs(path, exist_ok=True)
-    policy_exporter = _OnnxMotionPolicyExporter(env, actor_critic, normalizer, verbose)
+    policy_exporter = _OnnxMotionPolicyExporter(
+        env,
+        actor_critic,
+        resolve_actor_export_normalizer(actor_critic, normalizer),
+        verbose,
+    )
     policy_exporter.export(path, filename)
+
+
+def resolve_actor_export_normalizer(actor_critic: object, fallback: object | None = None) -> object | None:
+    """Resolve the observation normalizer to use for policy export.
+
+    RSL-RL <= 2.x stored the empirical normalizer on the runner, while 3.x
+    stores actor-side normalization on the policy itself.
+    """
+    if fallback is not None:
+        return fallback
+    return getattr(actor_critic, "actor_obs_normalizer", None)
+
+
+def resolve_rsl_rl_normalizer(runner_or_policy: object | None) -> object | None:
+    """Resolve the observation normalizer across rsl-rl versions.
+
+    Older releases exposed a runner-level `obs_normalizer`. Newer releases keep
+    the actor-side normalizer on the policy module.
+    """
+    if runner_or_policy is None:
+        return None
+
+    direct_normalizer = getattr(runner_or_policy, "obs_normalizer", None)
+    if direct_normalizer is not None:
+        return direct_normalizer
+
+    policy = getattr(runner_or_policy, "alg", None)
+    if policy is not None:
+        policy = getattr(policy, "policy", None)
+
+    if policy is None:
+        policy = runner_or_policy
+
+    for attr_name in ("actor_obs_normalizer", "student_obs_normalizer", "teacher_obs_normalizer"):
+        normalizer = getattr(policy, attr_name, None)
+        if normalizer is not None:
+            return normalizer
+
+    return None
 
 
 class _OnnxMotionPolicyExporter(_OnnxPolicyExporter):

@@ -18,7 +18,7 @@ from isaaclab.app import AppLauncher
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Replay motion from csv file and output to npz file.")
 parser.add_argument(
-    "--robot", type=str, default="pm01", choices=["pm01", "t800"], help="The robot configuration to use."
+    "--robot", type=str, default="t800", choices=["pm01", "t800"], help="The robot configuration to use."
 )
 parser.add_argument("--input_file", type=str, required=True, help="The path to the input motion csv file")
 parser.add_argument(
@@ -82,6 +82,7 @@ from isaaclab.utils.math import axis_angle_from_quat, quat_conjugate, quat_mul, 
 ##
 from whole_body_tracking.robots.pm01 import PM01_CYLINDER_CFG
 from whole_body_tracking.robots.t800 import T800_CFG
+from whole_body_tracking.tasks.tracking.config.t800.t800_mdp import T800_DFS_JOINT_NAMES, T800_MOTION_BODY_NAMES
 
 SOURCE_JOINT_ORDERS = {
     "pm01": [
@@ -111,29 +112,19 @@ SOURCE_JOINT_ORDERS = {
         "J23_HEAD_YAW",
     ],
     "t800": [
-        "J00_HIP_PITCH_L",
-        "J01_HIP_ROLL_L",
-        "J02_HIP_YAW_L",
-        "J03_KNEE_PITCH_L",
-        "J04_ANKLE_PITCH_L",
-        "J05_ANKLE_ROLL_L",
-        "J06_HIP_PITCH_R",
-        "J07_HIP_ROLL_R",
-        "J08_HIP_YAW_R",
-        "J09_KNEE_PITCH_R",
-        "J10_ANKLE_PITCH_R",
-        "J11_ANKLE_ROLL_R",
-        "J13_SHOULDER_PITCH_L",
-        "J14_SHOULDER_ROLL_L",
-        "J15_SHOULDER_YAW_L",
-        "J16_ELBOW_PITCH_L",
-        "J17_ELBOW_YAW_L",
-        "J20_SHOULDER_PITCH_R",
-        "J21_SHOULDER_ROLL_R",
-        "J22_SHOULDER_YAW_R",
-        "J23_ELBOW_PITCH_R",
-        "J24_ELBOW_YAW_R",
+        *T800_DFS_JOINT_NAMES,
     ],
+}
+
+MISSING_MOTION_BODY_FALLBACKS = {
+    "LINK_ANKLE_ROLL_L_TOE": "LINK_ANKLE_ROLL_L",
+    "LINK_ANKLE_ROLL_L_HEEL": "LINK_ANKLE_ROLL_L",
+    "LINK_ANKLE_ROLL_R_TOE": "LINK_ANKLE_ROLL_R",
+    "LINK_ANKLE_ROLL_R_HEEL": "LINK_ANKLE_ROLL_R",
+    "LINK_WRIST_PITCH_L": "LINK_ELBOW_YAW_L",
+    "LINK_WRIST_ROLL_L": "LINK_ELBOW_YAW_L",
+    "LINK_WRIST_PITCH_R": "LINK_ELBOW_YAW_R",
+    "LINK_WRIST_ROLL_R": "LINK_ELBOW_YAW_R",
 }
 
 
@@ -229,11 +220,18 @@ class MotionLoader:
             motion = self._load_npz_motion()
 
         motion = torch.from_numpy(motion).to(dtype=torch.float32).to(device=self.device)
+        joint_names = SOURCE_JOINT_ORDERS[args_cli.robot]
+        expected_cols = 7 + len(joint_names)
+        if motion.ndim != 2 or motion.shape[1] != expected_cols:
+            raise ValueError(
+                f"Expected [{expected_cols}] columns for robot '{args_cli.robot}' "
+                f"(3 root pos + 4 root quat + {len(joint_names)} joints), got shape {tuple(motion.shape)}."
+            )
 
         self.motion_base_poss_input = motion[:, :3]
         self.motion_base_rots_input = motion[:, 3:7]
         self.motion_base_rots_input = self.motion_base_rots_input[:, [3, 0, 1, 2]]  # convert to wxyz
-        self.motion_dof_poss_input = motion[:, 7 : 7 + 24]
+        self.motion_dof_poss_input = motion[:, 7 : 7 + len(joint_names)]
 
         self.input_frames = motion.shape[0]
         self.duration = (self.input_frames - 1) * self.input_dt
@@ -346,6 +344,23 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, joi
     # Extract scene entities
     robot = scene["robot"]
     robot_joint_indexes = robot.find_joints(joint_names, preserve_order=True)[0]
+    if len(robot_joint_indexes) != motion.motion_dof_poss_input.shape[1]:
+        raise ValueError(
+            f"Motion joint count ({motion.motion_dof_poss_input.shape[1]}) does not match mapped robot joints "
+            f"({len(robot_joint_indexes)}) for robot '{args_cli.robot}'."
+        )
+    body_indexes = None
+    if args_cli.robot == "t800":
+        body_name_to_index = {name: idx for idx, name in enumerate(robot.body_names)}
+        resolved_body_indexes = []
+        for body_name in T800_MOTION_BODY_NAMES:
+            resolved_name = body_name if body_name in body_name_to_index else MISSING_MOTION_BODY_FALLBACKS.get(body_name)
+            if resolved_name is None or resolved_name not in body_name_to_index:
+                raise ValueError(
+                    f"Failed to resolve motion body '{body_name}'. Available robot bodies: {robot.body_names}"
+                )
+            resolved_body_indexes.append(body_name_to_index[resolved_name])
+        body_indexes = torch.tensor(resolved_body_indexes, dtype=torch.long, device=sim.device)
 
     # ------- data logger -------------------------------------------------------
     log = {
@@ -396,12 +411,18 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, joi
         sim.set_camera_view(pos_lookat + np.array([2.0, 2.0, 0.5]), pos_lookat)
 
         if not file_saved:
-            log["joint_pos"].append(robot.data.joint_pos[0, :].cpu().numpy().copy())
-            log["joint_vel"].append(robot.data.joint_vel[0, :].cpu().numpy().copy())
-            log["body_pos_w"].append(robot.data.body_pos_w[0, :].cpu().numpy().copy())
-            log["body_quat_w"].append(robot.data.body_quat_w[0, :].cpu().numpy().copy())
-            log["body_lin_vel_w"].append(robot.data.body_lin_vel_w[0, :].cpu().numpy().copy())
-            log["body_ang_vel_w"].append(robot.data.body_ang_vel_w[0, :].cpu().numpy().copy())
+            log["joint_pos"].append(robot.data.joint_pos[0, robot_joint_indexes].cpu().numpy().copy())
+            log["joint_vel"].append(robot.data.joint_vel[0, robot_joint_indexes].cpu().numpy().copy())
+            if body_indexes is None:
+                log["body_pos_w"].append(robot.data.body_pos_w[0, :].cpu().numpy().copy())
+                log["body_quat_w"].append(robot.data.body_quat_w[0, :].cpu().numpy().copy())
+                log["body_lin_vel_w"].append(robot.data.body_lin_vel_w[0, :].cpu().numpy().copy())
+                log["body_ang_vel_w"].append(robot.data.body_ang_vel_w[0, :].cpu().numpy().copy())
+            else:
+                log["body_pos_w"].append(robot.data.body_pos_w[0, body_indexes].cpu().numpy().copy())
+                log["body_quat_w"].append(robot.data.body_quat_w[0, body_indexes].cpu().numpy().copy())
+                log["body_lin_vel_w"].append(robot.data.body_lin_vel_w[0, body_indexes].cpu().numpy().copy())
+                log["body_ang_vel_w"].append(robot.data.body_ang_vel_w[0, body_indexes].cpu().numpy().copy())
 
         if reset_flag and not file_saved:
             file_saved = True

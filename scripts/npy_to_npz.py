@@ -1,123 +1,98 @@
 #!/usr/bin/env python3
-"""Convert T800 npy motion to npz format for whole_body_tracking.
+"""Convert EngineAI T800 npy motion to the standard training npz format.
 
-NPY format (from engineaimuaythailab):
-  0-2:   base_pos (x, y, z)
-  3-6:   base_quat (w, x, y, z)
-  7-31:  joint_pos (25 joints, J00..J28)
-  32-35: contacts (left_toe, left_heel, right_toe, right_heel)
+NPY format:
+  32 columns:
+    0-2:   base_pos (x, y, z)
+    3-6:   base_quat (x, y, z, w)
+    7-31:  joint_pos (25 joints, DFS order)
+  40 columns:
+    0-2:   base_pos (x, y, z)
+    3-6:   base_quat (w, x, y, z)
+    7-31:  joint_pos (25 joints, DFS order)
+    32-35: contacts (left_toe, left_heel, right_toe, right_heel)
 
-Usage:
-    python scripts/npy_to_npz.py -i /path/to/motion.npy -o output.npz
+This script replays the motion through IsaacLab's T800 robot and records the
+canonical motion tensors used by training:
+  fps, joint_pos, joint_vel, body_pos_w, body_quat_w, body_lin_vel_w, body_ang_vel_w
 """
 
+"""Launch Isaac Sim Simulator first."""
+
 import argparse
-import io
-import os
-import sys
-import zipfile
 from pathlib import Path
-from typing import List, Optional, Set
 
 import numpy as np
 
+from isaaclab.app import AppLauncher
 
-def _candidate_engineai_roots() -> List[Path]:
-    """Return likely engineaimuaythailab checkout locations."""
-    script_path = Path(__file__).resolve()
-    candidates: List[Path] = []
+# add argparse arguments
+parser = argparse.ArgumentParser(description="Replay EngineAI npy motion and output a standard npz file.")
+parser.add_argument(
+    "--input_file",
+    "--input",
+    "-i",
+    dest="input_file",
+    type=str,
+    required=True,
+    help="The path to the input motion .npy file.",
+)
+parser.add_argument(
+    "--output_file",
+    "--output",
+    "-o",
+    dest="output_file",
+    type=str,
+    required=True,
+    help="The path to the output motion npz file.",
+)
+parser.add_argument("--input_fps", type=int, default=30, help="The fps of the input motion.")
+parser.add_argument("--output_fps", "--fps", dest="output_fps", type=int, default=50, help="The fps of the output motion.")
+parser.add_argument(
+    "--frame_range",
+    nargs=2,
+    type=int,
+    metavar=("START", "END"),
+    help=(
+        "Frame range: START END (both inclusive). The frame index starts from 1. If not provided, all frames will be"
+        " loaded."
+    ),
+)
+parser.add_argument(
+    "--engineai_lab",
+    type=str,
+    default=None,
+    help="Deprecated and ignored. The conversion no longer depends on the external engineaimuaythailab repository.",
+)
 
-    env_root = os.environ.get("ENGINEAI_LAB_ROOT")
-    if env_root:
-        candidates.append(Path(env_root).expanduser())
+# append AppLauncher cli args
+AppLauncher.add_app_launcher_args(parser)
+# parse the arguments
+args_cli = parser.parse_args()
 
-    # Check every parent directory and its parent for a sibling repo.
-    for parent in script_path.parents:
-        candidates.append(parent / "engineaimuaythailab")
-        if parent.parent != parent:
-            candidates.append(parent.parent / "engineaimuaythailab")
+assert Path(args_cli.input_file).resolve() != Path(args_cli.output_file).resolve(), "Input and output must differ."
 
-    # Deduplicate while preserving order.
-    deduped: List[Path] = []
-    seen: Set[Path] = set()
-    for candidate in candidates:
-        candidate = candidate.resolve(strict=False)
-        if candidate not in seen:
-            seen.add(candidate)
-            deduped.append(candidate)
-    return deduped
+# launch omniverse app
+app_launcher = AppLauncher(args_cli)
+simulation_app = app_launcher.app
 
+"""Rest everything follows."""
 
-def _resolve_engineai_lab(explicit_root: Optional[str]) -> Path:
-    """Locate the engineaimuaythailab checkout that provides T800MotionLoader."""
-    candidates: List[Path] = []
-    if explicit_root:
-        candidates.append(Path(explicit_root).expanduser())
-    candidates.extend(_candidate_engineai_roots())
+import os
+import torch
 
-    for root in candidates:
-        source_dir = root / "source"
-        loader_file = source_dir / "dataset_utils" / "T800_motion_loader.py"
-        if loader_file.exists():
-            if str(source_dir) not in sys.path:
-                sys.path.insert(0, str(source_dir))
-            dataset_utils_dir = source_dir / "dataset_utils"
-            if str(dataset_utils_dir) not in sys.path:
-                sys.path.insert(0, str(dataset_utils_dir))
-            return root
+import isaaclab.sim as sim_utils
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg
+from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
+from isaaclab.sim import SimulationContext
+from isaaclab.utils import configclass
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab.utils.math import axis_angle_from_quat, quat_conjugate, quat_mul, quat_slerp
 
-    formatted_candidates = "\n".join(f"  - {path}" for path in candidates)
-    raise FileNotFoundError(
-        "engineaimuaythailab not found.\n"
-        "Set --engineai_lab /path/to/engineaimuaythailab or export ENGINEAI_LAB_ROOT.\n"
-        f"Tried:\n{formatted_candidates}"
-    )
+from whole_body_tracking.robots.t800 import T800_CFG
+from whole_body_tracking.tasks.tracking.config.t800.t800_mdp import T800_DFS_JOINT_NAMES, T800_MOTION_BODY_NAMES
 
-# T800 body order: this repository only supports DFS.
-T800_BODY_ORDER = [
-    "LINK_BASE", "LINK_HIP_PITCH_L", "LINK_HIP_ROLL_L", "LINK_HIP_YAW_L", "LINK_KNEE_PITCH_L",
-    "LINK_ANKLE_PITCH_L", "LINK_ANKLE_ROLL_L", "LINK_ANKLE_ROLL_L_TOE", "LINK_ANKLE_ROLL_L_HEEL",
-    "LINK_HIP_PITCH_R", "LINK_HIP_ROLL_R", "LINK_HIP_YAW_R", "LINK_KNEE_PITCH_R",
-    "LINK_ANKLE_PITCH_R", "LINK_ANKLE_ROLL_R", "LINK_ANKLE_ROLL_R_TOE", "LINK_ANKLE_ROLL_R_HEEL",
-    "LINK_TORSO_YAW", "LINK_SHOULDER_PITCH_L", "LINK_SHOULDER_ROLL_L", "LINK_SHOULDER_YAW_L",
-    "LINK_ELBOW_PITCH_L", "LINK_ELBOW_YAW_L", "LINK_WRIST_PITCH_L", "LINK_WRIST_ROLL_L",
-    "LINK_SHOULDER_PITCH_R", "LINK_SHOULDER_ROLL_R", "LINK_SHOULDER_YAW_R",
-    "LINK_ELBOW_PITCH_R", "LINK_ELBOW_YAW_R", "LINK_WRIST_PITCH_R", "LINK_WRIST_ROLL_R",
-    "LINK_HEAD_PITCH", "LINK_HEAD_YAW",
-]
-
-# T800MotionLoader LINK_NAMES (FK output order)
-FK_LINK_NAMES = [
-    "LINK_BASE",
-    "LINK_HIP_ROLL_L",
-    "LINK_HIP_YAW_L",
-    "LINK_HIP_PITCH_L",
-    "LINK_KNEE_PITCH_L",
-    "LINK_ANKLE_PITCH_L",
-    "LINK_ANKLE_ROLL_L",
-    "LINK_HIP_ROLL_R",
-    "LINK_HIP_YAW_R",
-    "LINK_HIP_PITCH_R",
-    "LINK_KNEE_PITCH_R",
-    "LINK_ANKLE_PITCH_R",
-    "LINK_ANKLE_ROLL_R",
-    "LINK_TORSO_YAW",
-    "LINK_SHOULDER_PITCH_L",
-    "LINK_SHOULDER_ROLL_L",
-    "LINK_SHOULDER_YAW_L",
-    "LINK_ELBOW_PITCH_L",
-    "LINK_ELBOW_YAW_L",
-    "LINK_SHOULDER_PITCH_R",
-    "LINK_SHOULDER_ROLL_R",
-    "LINK_SHOULDER_YAW_R",
-    "LINK_ELBOW_PITCH_R",
-    "LINK_ELBOW_YAW_R",
-    "LINK_HEAD_PITCH",
-    "LINK_HEAD_YAW",
-]
-
-# Map FK links to body index; for TOE/HEEL/WRIST use parent
-CHILD_TO_PARENT = {
+MISSING_MOTION_BODY_FALLBACKS = {
     "LINK_ANKLE_ROLL_L_TOE": "LINK_ANKLE_ROLL_L",
     "LINK_ANKLE_ROLL_L_HEEL": "LINK_ANKLE_ROLL_L",
     "LINK_ANKLE_ROLL_R_TOE": "LINK_ANKLE_ROLL_R",
@@ -129,113 +104,272 @@ CHILD_TO_PARENT = {
 }
 
 
-def save_npz_non_zip64(output_path: Path, **arrays: np.ndarray) -> None:
-    """Write an npz file compatible with cnpy by disabling ZIP64 extensions."""
-    with zipfile.ZipFile(
-        output_path, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=False, compresslevel=6
-    ) as zf:
-        for name, array in arrays.items():
-            buffer = io.BytesIO()
-            np.save(buffer, array, allow_pickle=False)
-            zf.writestr(f"{name}.npy", buffer.getvalue())
+@configclass
+class ReplayMotionsSceneCfg(InteractiveSceneCfg):
+    """Configuration for a replay motions scene."""
+
+    # ground plane
+    ground = AssetBaseCfg(prim_path="/World/defaultGroundPlane", spawn=sim_utils.GroundPlaneCfg())
+
+    # lights
+    sky_light = AssetBaseCfg(
+        prim_path="/World/skyLight",
+        spawn=sim_utils.DomeLightCfg(
+            intensity=750.0,
+            texture_file=f"{ISAAC_NUCLEUS_DIR}/Materials/Textures/Skies/PolyHaven/kloofendal_43d_clear_puresky_4k.hdr",
+        ),
+    )
+
+    # articulation
+    robot: ArticulationCfg = T800_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+
+
+class MotionLoader:
+    def __init__(
+        self,
+        motion_file: str,
+        input_fps: int,
+        output_fps: int,
+        device: torch.device,
+        frame_range: tuple[int, int] | None,
+    ):
+        self.motion_file = motion_file
+        self.input_fps = input_fps
+        self.output_fps = output_fps
+        self.input_dt = 1.0 / self.input_fps
+        self.output_dt = 1.0 / self.output_fps
+        self.current_idx = 0
+        self.device = device
+        self.frame_range = frame_range
+        self._load_motion()
+        self._interpolate_motion()
+        self._compute_velocities()
+
+    def _load_npy_motion(self):
+        motion = np.load(self.motion_file)
+        if motion.ndim != 2 or motion.shape[1] not in (32, 40):
+            raise ValueError(
+                f"Expected an [T, 32] or [T, 40] motion array with base/joint columns, got shape {motion.shape}."
+            )
+
+        start = None if self.frame_range is None else self.frame_range[0] - 1
+        end = None if self.frame_range is None else self.frame_range[1]
+        return motion[start:end]
+
+    def _load_motion(self):
+        """Loads the motion from the npy file."""
+        if not self.motion_file.lower().endswith(".npy"):
+            raise ValueError(f"Expected a .npy motion file, got: {self.motion_file}")
+
+        motion = torch.from_numpy(self._load_npy_motion()).to(dtype=torch.float32).to(device=self.device)
+
+        self.motion_base_poss_input = motion[:, :3]
+        self.motion_base_rots_input = motion[:, 3:7]
+        if motion.shape[1] == 32:
+            self.motion_base_rots_input = self.motion_base_rots_input[:, [3, 0, 1, 2]]
+        self.motion_base_rots_input = self.motion_base_rots_input / torch.clamp(
+            torch.norm(self.motion_base_rots_input, dim=-1, keepdim=True), min=1e-8
+        )
+        self.motion_dof_poss_input = motion[:, 7 : 7 + 25]
+        self.motion_contacts = motion[:, 32:36] if motion.shape[1] >= 36 else None
+
+        if self.motion_dof_poss_input.shape[1] != len(T800_DFS_JOINT_NAMES):
+            raise ValueError(
+                f"Expected {len(T800_DFS_JOINT_NAMES)} joint positions, got {self.motion_dof_poss_input.shape[1]}."
+            )
+
+        self.input_frames = motion.shape[0]
+        if self.input_frames < 2:
+            raise ValueError("Motion must contain at least 2 frames.")
+        self.duration = (self.input_frames - 1) * self.input_dt
+        print(f"Motion loaded ({self.motion_file}), duration: {self.duration} sec, frames: {self.input_frames}")
+
+    def _interpolate_motion(self):
+        """Interpolates the motion to the output fps."""
+        times = torch.arange(0, self.duration, self.output_dt, device=self.device, dtype=torch.float32)
+        self.output_frames = times.shape[0]
+        index_0, index_1, blend = self._compute_frame_blend(times)
+        self.motion_base_poss = self._lerp(
+            self.motion_base_poss_input[index_0],
+            self.motion_base_poss_input[index_1],
+            blend.unsqueeze(1),
+        )
+        self.motion_base_rots = self._slerp(
+            self.motion_base_rots_input[index_0],
+            self.motion_base_rots_input[index_1],
+            blend,
+        )
+        self.motion_dof_poss = self._lerp(
+            self.motion_dof_poss_input[index_0],
+            self.motion_dof_poss_input[index_1],
+            blend.unsqueeze(1),
+        )
+        print(
+            f"Motion interpolated, input frames: {self.input_frames}, input fps: {self.input_fps}, output frames:"
+            f" {self.output_frames}, output fps: {self.output_fps}"
+        )
+
+    def _lerp(self, a: torch.Tensor, b: torch.Tensor, blend: torch.Tensor) -> torch.Tensor:
+        """Linear interpolation between two tensors."""
+        return a * (1 - blend) + b * blend
+
+    def _slerp(self, a: torch.Tensor, b: torch.Tensor, blend: torch.Tensor) -> torch.Tensor:
+        """Spherical linear interpolation between two quaternions."""
+        slerped_quats = torch.zeros_like(a)
+        for i in range(a.shape[0]):
+            slerped_quats[i] = quat_slerp(a[i], b[i], blend[i])
+        return slerped_quats
+
+    def _compute_frame_blend(self, times: torch.Tensor) -> torch.Tensor:
+        """Computes the frame blend for the motion."""
+        phase = times / self.duration
+        index_0 = (phase * (self.input_frames - 1)).floor().long()
+        index_1 = torch.minimum(index_0 + 1, torch.tensor(self.input_frames - 1, device=self.device))
+        blend = phase * (self.input_frames - 1) - index_0
+        return index_0, index_1, blend
+
+    def _compute_velocities(self):
+        """Computes the velocities of the motion."""
+        self.motion_base_lin_vels = torch.gradient(self.motion_base_poss, spacing=self.output_dt, dim=0)[0]
+        self.motion_dof_vels = torch.gradient(self.motion_dof_poss, spacing=self.output_dt, dim=0)[0]
+        self.motion_base_ang_vels = self._so3_derivative(self.motion_base_rots, self.output_dt)
+
+    def _so3_derivative(self, rotations: torch.Tensor, dt: float) -> torch.Tensor:
+        """Computes the derivative of a sequence of SO3 rotations."""
+        q_prev, q_next = rotations[:-2], rotations[2:]
+        q_rel = quat_mul(q_next, quat_conjugate(q_prev))
+
+        omega = axis_angle_from_quat(q_rel) / (2.0 * dt)
+        omega = torch.cat([omega[:1], omega, omega[-1:]], dim=0)
+        return omega
+
+    def get_next_state(
+        self,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        """Gets the next state of the motion."""
+        state = (
+            self.motion_base_poss[self.current_idx : self.current_idx + 1],
+            self.motion_base_rots[self.current_idx : self.current_idx + 1],
+            self.motion_base_lin_vels[self.current_idx : self.current_idx + 1],
+            self.motion_base_ang_vels[self.current_idx : self.current_idx + 1],
+            self.motion_dof_poss[self.current_idx : self.current_idx + 1],
+            self.motion_dof_vels[self.current_idx : self.current_idx + 1],
+        )
+        self.current_idx += 1
+        reset_flag = False
+        if self.current_idx >= self.output_frames:
+            self.current_idx = 0
+            reset_flag = True
+        return state, reset_flag
+
+
+def run_simulator(sim: SimulationContext, scene: InteractiveScene):
+    """Runs the simulation loop."""
+    motion = MotionLoader(
+        motion_file=args_cli.input_file,
+        input_fps=args_cli.input_fps,
+        output_fps=args_cli.output_fps,
+        device=sim.device,
+        frame_range=args_cli.frame_range,
+    )
+
+    robot = scene["robot"]
+    robot_joint_indexes = robot.find_joints(T800_DFS_JOINT_NAMES, preserve_order=True)[0]
+    body_name_to_index = {name: idx for idx, name in enumerate(robot.body_names)}
+    motion_body_indexes = []
+    for body_name in T800_MOTION_BODY_NAMES:
+        resolved_name = body_name if body_name in body_name_to_index else MISSING_MOTION_BODY_FALLBACKS.get(body_name)
+        if resolved_name is None or resolved_name not in body_name_to_index:
+            raise ValueError(
+                f"Failed to resolve motion body '{body_name}'. Available robot bodies: {robot.body_names}"
+            )
+        motion_body_indexes.append(body_name_to_index[resolved_name])
+    motion_body_indexes = torch.tensor(motion_body_indexes, dtype=torch.long, device=sim.device)
+
+    log = {
+        "fps": np.array([args_cli.output_fps], dtype=np.float32),
+        "joint_pos": [],
+        "joint_vel": [],
+        "body_pos_w": [],
+        "body_quat_w": [],
+        "body_lin_vel_w": [],
+        "body_ang_vel_w": [],
+    }
+    file_saved = False
+
+    while simulation_app.is_running():
+        (
+            (
+                motion_base_pos,
+                motion_base_rot,
+                motion_base_lin_vel,
+                motion_base_ang_vel,
+                motion_dof_pos,
+                motion_dof_vel,
+            ),
+            reset_flag,
+        ) = motion.get_next_state()
+
+        root_states = robot.data.default_root_state.clone()
+        root_states[:, :3] = motion_base_pos
+        root_states[:, :2] += scene.env_origins[:, :2]
+        root_states[:, 3:7] = motion_base_rot
+        root_states[:, 7:10] = motion_base_lin_vel
+        root_states[:, 10:] = motion_base_ang_vel
+        robot.write_root_state_to_sim(root_states)
+
+        joint_pos = robot.data.default_joint_pos.clone()
+        joint_vel = robot.data.default_joint_vel.clone()
+        joint_pos[:, robot_joint_indexes] = motion_dof_pos
+        joint_vel[:, robot_joint_indexes] = motion_dof_vel
+        robot.write_joint_state_to_sim(joint_pos, joint_vel)
+
+        sim.render()
+        scene.update(sim.get_physics_dt())
+
+        if not file_saved:
+            # Persist joint data in the DFS motion order expected by replay/training,
+            # not the articulation's internal storage order.
+            log["joint_pos"].append(robot.data.joint_pos[0, robot_joint_indexes].cpu().numpy().copy())
+            log["joint_vel"].append(robot.data.joint_vel[0, robot_joint_indexes].cpu().numpy().copy())
+            log["body_pos_w"].append(robot.data.body_pos_w[0, motion_body_indexes].cpu().numpy().copy())
+            log["body_quat_w"].append(robot.data.body_quat_w[0, motion_body_indexes].cpu().numpy().copy())
+            log["body_lin_vel_w"].append(robot.data.body_lin_vel_w[0, motion_body_indexes].cpu().numpy().copy())
+            log["body_ang_vel_w"].append(robot.data.body_ang_vel_w[0, motion_body_indexes].cpu().numpy().copy())
+
+        if reset_flag and not file_saved:
+            file_saved = True
+            for key in ("joint_pos", "joint_vel", "body_pos_w", "body_quat_w", "body_lin_vel_w", "body_ang_vel_w"):
+                log[key] = np.stack(log[key], axis=0)
+
+            output_path = Path(args_cli.output_file)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            np.savez(output_path, **log)
+            print(f"[INFO] Motion saved to {output_path}")
+            return
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert npy to npz for whole_body_tracking")
-    parser.add_argument("--input", "-i", type=str, required=True, help="Input .npy file")
-    parser.add_argument("--output", "-o", type=str, required=True, help="Output .npz file")
-    parser.add_argument("--fps", type=float, default=50.0, help="Output fps (default 50)")
-    parser.add_argument("--input_fps", type=float, default=30.0, help="Input npy fps (default 30)")
-    parser.add_argument(
-        "--engineai_lab",
-        type=str,
-        default=None,
-        help="Path to engineaimuaythailab checkout. If omitted, auto-detect or use ENGINEAI_LAB_ROOT.",
-    )
-    args = parser.parse_args()
+    """Main function."""
+    sim_cfg = sim_utils.SimulationCfg(device=args_cli.device)
+    sim_cfg.dt = 1.0 / args_cli.output_fps
+    sim = SimulationContext(sim_cfg)
 
-    engineai_root = _resolve_engineai_lab(args.engineai_lab)
-    print(f"[npy_to_npz] Using engineaimuaythailab from {engineai_root}")
-    from T800_motion_loader import T800MotionLoader
+    scene_cfg = ReplayMotionsSceneCfg(num_envs=1, env_spacing=2.0)
+    scene = InteractiveScene(scene_cfg)
 
-    input_path = Path(args.input)
-    output_path = Path(args.output)
-    if not input_path.exists():
-        print(f"[ERROR] Input not found: {input_path}")
-        sys.exit(1)
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Load npy and compute FK via T800MotionLoader
-    input_dt = 1.0 / args.input_fps
-    target_dt = 1.0 / args.fps
-    loader = T800MotionLoader(
-        str(input_path),
-        csv_dt=input_dt,
-        target_dt=target_dt,
-        device="cpu",
-        fix_base_height=False,
-    )
-    motion = loader.get_motion_data()
-
-    T = motion.frame_count
-    joint_pos = motion.joint_pos.numpy().astype(np.float32)
-    joint_vel = motion.joint_vel.numpy().astype(np.float32)
-    link_pos = motion.link_pos.numpy().astype(np.float32)  # [T, 25, 3]
-    link_quat = motion.link_quat.numpy().astype(np.float32)  # [T, 25, 4]
-    link_lin_vel = motion.link_lin_vel.numpy().astype(np.float32)
-    link_ang_vel = motion.link_ang_vel.numpy().astype(np.float32)
-
-    # Build body arrays in the repository-standard DFS T800 body order.
-    num_bodies = len(T800_BODY_ORDER)
-    print(f"[npy_to_npz] Using DFS body order ({num_bodies} bodies)")
-    body_pos_w = np.zeros((T, num_bodies, 3), dtype=np.float32)
-    body_quat_w = np.zeros((T, num_bodies, 4), dtype=np.float32)
-    body_lin_vel_w = np.zeros((T, num_bodies, 3), dtype=np.float32)
-    body_ang_vel_w = np.zeros((T, num_bodies, 3), dtype=np.float32)
-
-    fk_name_to_idx = {n: i for i, n in enumerate(FK_LINK_NAMES)}
-
-    for body_idx, body_name in enumerate(T800_BODY_ORDER):
-        if body_name in fk_name_to_idx:
-            fk_idx = fk_name_to_idx[body_name]
-            body_pos_w[:, body_idx, :] = link_pos[:, fk_idx, :]
-            body_quat_w[:, body_idx, :] = link_quat[:, fk_idx, :]
-            body_lin_vel_w[:, body_idx, :] = link_lin_vel[:, fk_idx, :]
-            body_ang_vel_w[:, body_idx, :] = link_ang_vel[:, fk_idx, :]
-        elif body_name in CHILD_TO_PARENT:
-            parent_name = CHILD_TO_PARENT[body_name]
-            parent_idx = fk_name_to_idx.get(parent_name)
-            if parent_idx is not None:
-                body_pos_w[:, body_idx, :] = link_pos[:, parent_idx, :]
-                body_quat_w[:, body_idx, :] = link_quat[:, parent_idx, :]
-                body_lin_vel_w[:, body_idx, :] = link_lin_vel[:, parent_idx, :]
-                body_ang_vel_w[:, body_idx, :] = link_ang_vel[:, parent_idx, :]
-            else:
-                body_pos_w[:, body_idx, :] = link_pos[:, 0, :]  # fallback to base
-                body_quat_w[:, body_idx, :] = link_quat[:, 0, :]
-                body_lin_vel_w[:, body_idx, :] = link_lin_vel[:, 0, :]
-                body_ang_vel_w[:, body_idx, :] = link_ang_vel[:, 0, :]
-        else:
-            body_pos_w[:, body_idx, :] = link_pos[:, 0, :]
-            body_quat_w[:, body_idx, :] = link_quat[:, 0, :]
-            body_lin_vel_w[:, body_idx, :] = link_lin_vel[:, 0, :]
-            body_ang_vel_w[:, body_idx, :] = link_ang_vel[:, 0, :]
-
-    save_npz_non_zip64(
-        output_path,
-        joint_pos=joint_pos,
-        joint_vel=joint_vel,
-        body_pos_w=body_pos_w,
-        body_quat_w=body_quat_w,
-        body_lin_vel_w=body_lin_vel_w,
-        body_ang_vel_w=body_ang_vel_w,
-        fps=np.array([args.fps], dtype=np.float32),
-    )
-    print(f"[OK] Saved {output_path}")
-    print(f"     Frames: {T}, FPS: {args.fps}, Bodies: {num_bodies}, Joints: {joint_pos.shape[1]}")
-    print(f"     Base Z range: [{body_pos_w[:, 0, 2].min():.3f}, {body_pos_w[:, 0, 2].max():.3f}]")
+    sim.reset()
+    print("[INFO] Setup complete...")
+    run_simulator(sim, scene)
 
 
 if __name__ == "__main__":
     main()
+    simulation_app.close()

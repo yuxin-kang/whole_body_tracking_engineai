@@ -3,6 +3,7 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import importlib.util
 import sys
 
 from isaaclab.app import AppLauncher
@@ -28,6 +29,12 @@ def _disable_robot_terminations(env_cfg):
     for name in list(vars(env_cfg.terminations).keys()):
         if name != "time_out":
             setattr(env_cfg.terminations, name, None)
+
+
+def _extract_obs(observations):
+    if isinstance(observations, tuple):
+        return observations[0]
+    return observations
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
@@ -85,7 +92,11 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 # Import extensions to set up environment tasks
 import whole_body_tracking.tasks  # noqa: F401
-from whole_body_tracking.utils.exporter import attach_onnx_metadata, export_motion_policy_as_onnx
+from whole_body_tracking.utils.exporter import (
+    attach_onnx_metadata,
+    export_motion_policy_as_onnx,
+    resolve_rsl_rl_normalizer,
+)
 
 
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
@@ -176,42 +187,51 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # export policy to onnx/jit
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
+    normalizer = resolve_rsl_rl_normalizer(ppo_runner)
 
     export_motion_policy_as_onnx(
         env.unwrapped,
         ppo_runner.alg.policy,
-        normalizer=ppo_runner.obs_normalizer,
+        normalizer=normalizer,
         path=export_model_dir,
         filename="policy.onnx",
     )
+    attach_onnx_metadata(env.unwrapped, args_cli.wandb_path if args_cli.wandb_path else "none", export_model_dir)
+
     # 导出后立即转换为MNN
     onnx_file = os.path.join(export_model_dir, "policy.onnx")
     mnn_file = os.path.join(export_model_dir, "policy.mnn")
 
     if os.path.exists(onnx_file):
-        subprocess.run(
-            [
-                "python",
-                "-m",
-                "MNN.tools.mnnconvert",
-                "-f",
-                "ONNX",
-                "--modelFile",
-                onnx_file,
-                "--MNNModel",
-                mnn_file,
-                "--bizCode",
-                "MNN",
-            ],
-            check=True,
-        )
-        print(f"Successfully converted to MNN: {mnn_file}")
+        try:
+            mnn_converter_spec = importlib.util.find_spec("MNN.tools.mnnconvert")
+        except ModuleNotFoundError:
+            mnn_converter_spec = None
+
+        if mnn_converter_spec is None:
+            print("[WARN] MNN.tools.mnnconvert is not available in the current Python environment. Skipping MNN export.")
+        else:
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "MNN.tools.mnnconvert",
+                    "-f",
+                    "ONNX",
+                    "--modelFile",
+                    onnx_file,
+                    "--MNNModel",
+                    mnn_file,
+                    "--bizCode",
+                    "MNN",
+                ],
+                check=True,
+            )
+            print(f"Successfully converted to MNN: {mnn_file}")
     else:
         print(f"ONNX file not found: {onnx_file}")
-
-    attach_onnx_metadata(env.unwrapped, args_cli.wandb_path if args_cli.wandb_path else "none", export_model_dir)
     # reset environment
-    obs, _ = env.get_observations()
+    obs = _extract_obs(env.get_observations())
     timestep = 0
     # simulate environment
     while simulation_app.is_running():
