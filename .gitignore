@@ -36,4 +36,4 @@ _repo
 _build
 .lastformat
 
-data
+**/data/*

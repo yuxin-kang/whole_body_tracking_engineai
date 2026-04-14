@@ -70,6 +70,38 @@ class T800FlatWoStateEstimationEnvCfg(T800FlatEnvCfg):
 
 
 @configclass
+class T800Flat540Huixuanti1EnvCfg(T800FlatEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.episode_length_s = 50.0
+
+        self.commands.motion.min_traj_duration = None
+        self.commands.motion.bridge_frames = 0
+
+        self.terminations.anchor_pos.params["threshold"] = 0.5
+        self.terminations.anchor_ori.params["threshold"] = 1.6
+        self.terminations.ee_body_pos.params["threshold"] = 0.5
+
+
+@configclass
+class T800FlatZhiquanEnvCfg(T800FlatEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.episode_length_s = 40.0
+
+        self.commands.motion.min_traj_duration = None
+        self.commands.motion.bridge_frames = 0
+
+        self.rewards.undesired_contacts.params["sensor_cfg"].body_names = [
+            r"^(?!LINK_ANKLE_ROLL_L$)(?!LINK_ANKLE_ROLL_R$)(?!LINK_ELBOW_YAW_L$).+$"
+        ]
+
+        self.terminations.anchor_pos.params["threshold"] = 0.4
+        self.terminations.anchor_ori.params["threshold"] = 1.0
+        self.terminations.ee_body_pos.params["threshold"] = 0.4
+
+
+@configclass
 class T800FlatLowFreqEnvCfg(T800FlatEnvCfg):
     def __post_init__(self):
         super().__post_init__()
