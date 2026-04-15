@@ -24,6 +24,8 @@ from isaaclab.utils.math import (
     yaw_quat,
 )
 
+from whole_body_tracking.tasks.tracking.debug_utils import collect_ee_body_violations
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
@@ -218,6 +220,12 @@ class MotionCommand(CommandTerm):
             [self.cfg.adaptive_lambda**i for i in range(self.cfg.adaptive_kernel_size)], device=self.device
         )
         self.kernel = self.kernel / self.kernel.sum()
+        self._termination_debug_anchor_pos_error = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self._termination_debug_anchor_ori_error = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self._termination_debug_body_pos_error = torch.zeros(
+            self.num_envs, len(cfg.body_names), dtype=torch.float32, device=self.device
+        )
+        self._play_from_start = False
 
         self.metrics["error_anchor_pos"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["error_anchor_rot"] = torch.zeros(self.num_envs, device=self.device)
@@ -378,6 +386,93 @@ class MotionCommand(CommandTerm):
         self.metrics["sampling_top1_prob"][:] = pmax
         self.metrics["sampling_top1_bin"][:] = imax.float() / self.bin_count
 
+    def update_termination_debug_anchor_pos(self, error: torch.Tensor):
+        self._termination_debug_anchor_pos_error.copy_(error.detach())
+
+    def update_termination_debug_anchor_ori(self, error: torch.Tensor):
+        self._termination_debug_anchor_ori_error.copy_(error.detach())
+
+    def update_termination_debug_body_pos(self, error: torch.Tensor, body_indexes: Sequence[int] | torch.Tensor):
+        self._termination_debug_body_pos_error.zero_()
+        if isinstance(body_indexes, torch.Tensor):
+            body_index_tensor = body_indexes.to(device=self.device, dtype=torch.long)
+        else:
+            if len(body_indexes) == 0:
+                return
+            body_index_tensor = torch.tensor(body_indexes, dtype=torch.long, device=self.device)
+        if body_index_tensor.numel() == 0:
+            return
+        self._termination_debug_body_pos_error[:, body_index_tensor] = error.detach()
+
+    def set_play_from_start_mode(self):
+        self._play_from_start = True
+        self.time_steps.zero_()
+        self.bin_failed_count.zero_()
+        self._current_bin_failed.zero_()
+        env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
+        self._reset_envs_from_motion(env_ids)
+        self._refresh_relative_motion_state(env_ids)
+        self._update_metrics()
+
+    def get_termination_debug_info(self, env_ids: Sequence[int] | torch.Tensor) -> list[dict[str, object]]:
+        if isinstance(env_ids, torch.Tensor):
+            env_ids_tensor = env_ids.to(device=self.device, dtype=torch.long)
+        else:
+            env_ids_tensor = torch.tensor(list(env_ids), dtype=torch.long, device=self.device)
+        if env_ids_tensor.numel() == 0:
+            return []
+
+        infos: list[dict[str, object]] = []
+        terminations_cfg = self._env.cfg.terminations
+        anchor_pos_cfg = getattr(terminations_cfg, "anchor_pos", None)
+        anchor_ori_cfg = getattr(terminations_cfg, "anchor_ori", None)
+        ee_body_pos_cfg = getattr(terminations_cfg, "ee_body_pos", None)
+
+        ee_body_indexes: list[int] = []
+        ee_body_names: list[str] = []
+        ee_body_threshold: float | None = None
+        if ee_body_pos_cfg is not None:
+            ee_body_threshold = float(ee_body_pos_cfg.params["threshold"])
+            ee_body_names_filter = ee_body_pos_cfg.params.get("body_names")
+            ee_body_indexes = [
+                i for i, name in enumerate(self.cfg.body_names) if (ee_body_names_filter is None) or (name in ee_body_names_filter)
+            ]
+            ee_body_names = [self.cfg.body_names[i] for i in ee_body_indexes]
+
+        for env_id in env_ids_tensor.tolist():
+            triggered_terms: list[dict[str, object]] = []
+            if anchor_pos_cfg is not None:
+                threshold = float(anchor_pos_cfg.params["threshold"])
+                error = float(self._termination_debug_anchor_pos_error[env_id].item())
+                if error > threshold:
+                    triggered_terms.append({"term": "anchor_pos", "error": error, "threshold": threshold})
+
+            if anchor_ori_cfg is not None:
+                threshold = float(anchor_ori_cfg.params["threshold"])
+                error = float(self._termination_debug_anchor_ori_error[env_id].item())
+                if error > threshold:
+                    triggered_terms.append({"term": "anchor_ori", "error": error, "threshold": threshold})
+
+            if ee_body_threshold is not None and ee_body_indexes:
+                error_z_values = self._termination_debug_body_pos_error[env_id, ee_body_indexes].detach().cpu().tolist()
+                violations = [
+                    violation
+                    for violation in collect_ee_body_violations(ee_body_names, error_z_values, ee_body_threshold)
+                    if violation["triggered"]
+                ]
+                if violations:
+                    triggered_terms.append(
+                        {
+                            "term": "ee_body_pos",
+                            "threshold": ee_body_threshold,
+                            "violations": violations,
+                        }
+                    )
+
+            infos.append({"env_id": env_id, "triggered_terms": triggered_terms})
+
+        return infos
+
     def _refresh_relative_motion_state(self, env_ids: torch.Tensor | None = None):
         if env_ids is None:
             env_ids_tensor = torch.arange(self.num_envs, device=self.device)
@@ -502,7 +597,17 @@ class MotionCommand(CommandTerm):
         if len(env_ids) == 0:
             return
         env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
+        if self._play_from_start:
+            self.time_steps[env_ids] = 0
+            self._reset_envs_from_motion(env_ids)
+            self._refresh_relative_motion_state(env_ids)
+            return
         self._adaptive_sampling(env_ids)
+        if self.cfg.reset_preroll_frames > 0:
+            self.time_steps[env_ids] = torch.clamp(
+                self.time_steps[env_ids] - self.cfg.reset_preroll_frames,
+                min=0,
+            )
 
         pd_stand_ratio = float(self.cfg.pd_stand_reset_ratio)
         if pd_stand_ratio <= 0.0:
@@ -605,6 +710,7 @@ class MotionCommandCfg(CommandTermCfg):
     adaptive_uniform_ratio: float = 0.1
     adaptive_alpha: float = 0.001
     pd_stand_reset_ratio: float = 0.0
+    reset_preroll_frames: int = 0
 
     anchor_visualizer_cfg: VisualizationMarkersCfg = FRAME_MARKER_CFG.replace(prim_path="/Visuals/Command/pose")
     anchor_visualizer_cfg.markers["frame"].scale = (0.2, 0.2, 0.2)

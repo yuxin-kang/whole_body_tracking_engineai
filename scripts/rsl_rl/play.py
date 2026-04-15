@@ -52,6 +52,18 @@ parser.add_argument(
     default=False,
     help="Disable all robot terminations except time_out.",
 )
+parser.add_argument(
+    "--debug_terminations",
+    type=_str2bool,
+    default=False,
+    help="Print triggered termination terms and error values when an environment ends.",
+)
+parser.add_argument(
+    "--play_from_start",
+    type=_str2bool,
+    default=False,
+    help="In play mode, always start each motion rollout from frame 0 instead of sampling a random segment.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -92,11 +104,28 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 # Import extensions to set up environment tasks
 import whole_body_tracking.tasks  # noqa: F401
+from whole_body_tracking.tasks.tracking.debug_utils import format_termination_debug_report
 from whole_body_tracking.utils.exporter import (
     attach_onnx_metadata,
     export_motion_policy_as_onnx,
     resolve_rsl_rl_normalizer,
 )
+
+
+def _print_termination_debug(base_env, dones: torch.Tensor):
+    done_ids = torch.nonzero(dones, as_tuple=False).squeeze(-1)
+    if done_ids.numel() == 0:
+        return
+
+    motion_command = base_env.command_manager.get_term("motion")
+    for info in motion_command.get_termination_debug_info(done_ids):
+        for line in format_termination_debug_report(info):
+            print(line)
+
+
+def _enable_play_from_start(base_env):
+    motion_command = base_env.command_manager.get_term("motion")
+    motion_command.set_play_from_start_mode()
 
 
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
@@ -156,6 +185,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    if args_cli.play_from_start:
+        _enable_play_from_start(env.unwrapped)
 
     log_dir = os.path.dirname(resume_path)
 
@@ -240,7 +271,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # agent stepping
             actions = policy(obs)
             # env stepping
-            obs, _, _, _ = env.step(actions)
+            obs, _, dones, _ = env.step(actions)
+            if args_cli.debug_terminations:
+                _print_termination_debug(env.unwrapped, dones)
         if args_cli.video:
             timestep += 1
             # Exit the play loop after recording one video

@@ -11,6 +11,7 @@
 import argparse
 import numpy as np
 import torch
+import time
 
 from isaaclab.app import AppLauncher
 
@@ -101,6 +102,25 @@ class ReplayMotionsSceneCfg(InteractiveSceneCfg):
     robot: ArticulationCfg = T800_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
 
+def _print_replay_timing_summary(motion_file: str, motion: MotionLoader, sim_dt: float):
+    metadata_duration_s = max(motion.time_step_total - 1, 0) / max(motion.fps, 1e-8)
+    logical_replay_fps = 1.0 / sim_dt
+    logical_cycle_duration_s = motion.time_step_total * sim_dt
+
+    print("[INFO] Replay timing summary")
+    print(f"  motion_file: {motion_file}")
+    print(f"  metadata_fps: {motion.fps:.4f}")
+    print(f"  num_frames: {motion.time_step_total}")
+    print(f"  metadata_duration_s: {metadata_duration_s:.4f}")
+    print(f"  logical_replay_fps: {logical_replay_fps:.4f}")
+    print(f"  logical_cycle_duration_s: {logical_cycle_duration_s:.4f}")
+    print("  NOTE: filename labels like '12hz' are not trusted here; use the numbers above instead.")
+    if abs(motion.fps - logical_replay_fps) > 1e-3:
+        print(
+            "  WARN: metadata_fps differs from logical_replay_fps, so file metadata and replay cadence do not match."
+        )
+
+
 def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     # Extract scene entities
     robot: Articulation = scene["robot"]
@@ -128,6 +148,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         torch.tensor([0], dtype=torch.long, device=sim.device),
         sim.device,
     )
+    _print_replay_timing_summary(motion_file, motion, sim_dt)
     motion_joint_names = ROBOT_MOTION_JOINT_NAMES.get(args_cli.robot)
     robot_joint_indexes = None
     if motion_joint_names is not None:
@@ -138,11 +159,17 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
                 f"({len(robot_joint_indexes)}) for robot '{args_cli.robot}'."
             )
     time_steps = torch.zeros(scene.num_envs, dtype=torch.long, device=sim.device)
+    cycle_wall_clock_start = time.perf_counter()
+    wall_clock_reported = False
 
     # Simulation loop
     while simulation_app.is_running():
         time_steps += 1
         reset_ids = time_steps >= motion.time_step_total
+        if torch.any(reset_ids) and not wall_clock_reported:
+            wall_clock_cycle_duration_s = time.perf_counter() - cycle_wall_clock_start
+            print(f"  wall_clock_cycle_duration_s: {wall_clock_cycle_duration_s:.4f}")
+            wall_clock_reported = True
         time_steps[reset_ids] = 0
 
         root_states = robot.data.default_root_state.clone()
