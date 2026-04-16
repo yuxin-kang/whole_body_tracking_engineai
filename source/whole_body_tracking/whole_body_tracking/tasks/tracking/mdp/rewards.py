@@ -4,6 +4,7 @@ import torch
 from typing import TYPE_CHECKING
 
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.assets import Articulation
 from isaaclab.sensors import ContactSensor
 from isaaclab.utils.math import quat_error_magnitude
 
@@ -80,3 +81,32 @@ def feet_contact_time(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, thresh
     last_contact_time = contact_sensor.data.last_contact_time[:, sensor_cfg.body_ids]
     reward = torch.sum((last_contact_time < threshold) * first_air, dim=-1)
     return reward
+
+
+def support_foot_com_distance_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    sensor_cfg: SceneEntityCfg,
+    force_threshold: float,
+    std: float,
+) -> torch.Tensor:
+    asset: Articulation = env.scene[asset_cfg.name]
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+
+    foot_pos_w = asset.data.body_pos_w[:, asset_cfg.body_ids, :2]
+    root_com_xy = asset.data.root_com_pos_w[:, :2]
+
+    contact_force_norm = torch.norm(contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids], dim=-1)
+    contact_mask = (contact_force_norm > force_threshold).to(foot_pos_w.dtype)
+
+    support_pos_xy = torch.sum(foot_pos_w * contact_mask.unsqueeze(-1), dim=1)
+    support_count = contact_mask.sum(dim=1, keepdim=True)
+    fallback_midpoint_xy = foot_pos_w.mean(dim=1)
+    support_pos_xy = torch.where(
+        support_count > 0.0,
+        support_pos_xy / support_count.clamp_min(1.0),
+        fallback_midpoint_xy,
+    )
+
+    error = torch.sum(torch.square(root_com_xy - support_pos_xy), dim=-1)
+    return torch.exp(-error / std**2)
