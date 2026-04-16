@@ -368,6 +368,16 @@ class MotionCommand(CommandTerm):
         )
         sampling_probabilities = torch.nn.functional.conv1d(sampling_probabilities, self.kernel.view(1, 1, -1)).view(-1)
 
+        if self.cfg.phase_sampling_windows:
+            bin_centers = (torch.arange(self.bin_count, device=self.device, dtype=torch.float32) + 0.5) / float(self.bin_count)
+            phase_weights = torch.ones_like(sampling_probabilities)
+            for phase_start, phase_end, weight in self.cfg.phase_sampling_windows:
+                if weight <= 0.0:
+                    continue
+                in_window = (bin_centers >= phase_start) & (bin_centers <= phase_end)
+                phase_weights = torch.where(in_window, phase_weights * float(weight), phase_weights)
+            sampling_probabilities = sampling_probabilities * phase_weights
+
         sampling_probabilities = sampling_probabilities / sampling_probabilities.sum()
 
         sampled_bins = torch.multinomial(sampling_probabilities, len(env_ids), replacement=True)
@@ -709,6 +719,7 @@ class MotionCommandCfg(CommandTermCfg):
     adaptive_lambda: float = 0.8
     adaptive_uniform_ratio: float = 0.1
     adaptive_alpha: float = 0.001
+    phase_sampling_windows: list[tuple[float, float, float]] = []
     pd_stand_reset_ratio: float = 0.0
     reset_preroll_frames: int = 0
 

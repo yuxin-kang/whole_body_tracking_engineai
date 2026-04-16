@@ -17,29 +17,140 @@ T800_TRACKING_END_EFFECTOR_BODY_NAMES = [
     "LINK_ELBOW_YAW_R",
 ]
 T800_SUPPORT_FOOT_BODY_NAMES = ["LINK_ANKLE_ROLL_L", "LINK_ANKLE_ROLL_R"]
+T800_540_KICK_BODY_NAMES = ["LINK_ANKLE_ROLL_R"]
+T800_540_KICK_LEG_BODY_NAMES = ["LINK_KNEE_PITCH_R", "LINK_ANKLE_ROLL_R"]
+T800_540_SUPPORT_LEG_BODY_NAMES = ["LINK_KNEE_PITCH_L", "LINK_ANKLE_ROLL_L"]
+T800_540_KICK_PHASE = (0.43, 0.50)
+T800_540_RETRACT_PHASE = (0.50, 0.62)
 
 
-def _make_end_effector_position_reward(weight: float, std: float) -> RewTerm:
+def _make_body_position_reward(weight: float, std: float, body_names: list[str]) -> RewTerm:
     return RewTerm(
         func=mdp.motion_relative_body_position_error_exp,
         weight=weight,
         params={
             "command_name": "motion",
             "std": std,
-            "body_names": T800_TRACKING_END_EFFECTOR_BODY_NAMES,
+            "body_names": body_names,
         },
     )
 
 
-def _make_end_effector_linear_velocity_reward(weight: float, std: float) -> RewTerm:
+def _make_body_linear_velocity_reward(weight: float, std: float, body_names: list[str]) -> RewTerm:
     return RewTerm(
         func=mdp.motion_global_body_linear_velocity_error_exp,
         weight=weight,
         params={
             "command_name": "motion",
             "std": std,
-            "body_names": T800_TRACKING_END_EFFECTOR_BODY_NAMES,
+            "body_names": body_names,
         },
+    )
+
+
+def _make_phase_body_position_reward(
+    weight: float,
+    std: float,
+    body_names: list[str],
+    phase_start: float,
+    phase_end: float,
+) -> RewTerm:
+    return RewTerm(
+        func=mdp.phase_motion_relative_body_position_error_exp,
+        weight=weight,
+        params={
+            "command_name": "motion",
+            "std": std,
+            "body_names": body_names,
+            "phase_start": phase_start,
+            "phase_end": phase_end,
+        },
+    )
+
+
+def _make_phase_body_linear_velocity_reward(
+    weight: float,
+    std: float,
+    body_names: list[str],
+    phase_start: float,
+    phase_end: float,
+) -> RewTerm:
+    return RewTerm(
+        func=mdp.phase_motion_global_body_linear_velocity_error_exp,
+        weight=weight,
+        params={
+            "command_name": "motion",
+            "std": std,
+            "body_names": body_names,
+            "phase_start": phase_start,
+            "phase_end": phase_end,
+        },
+    )
+
+
+def _make_end_effector_position_reward(weight: float, std: float) -> RewTerm:
+    return _make_body_position_reward(
+        weight=weight,
+        std=std,
+        body_names=T800_TRACKING_END_EFFECTOR_BODY_NAMES,
+    )
+
+
+def _make_end_effector_linear_velocity_reward(weight: float, std: float) -> RewTerm:
+    return _make_body_linear_velocity_reward(
+        weight=weight,
+        std=std,
+        body_names=T800_TRACKING_END_EFFECTOR_BODY_NAMES,
+    )
+
+
+def _set_540_phase_sampling_focus(env_cfg, kick_weight: float = 4.0, retract_weight: float = 2.5):
+    env_cfg.commands.motion.phase_sampling_windows = [
+        (T800_540_KICK_PHASE[0], T800_540_KICK_PHASE[1], kick_weight),
+        (T800_540_RETRACT_PHASE[0], T800_540_RETRACT_PHASE[1], retract_weight),
+    ]
+
+
+def _add_540_kick_position_reward(env_cfg, weight: float, std: float, reward_name: str = "kick_right_pos"):
+    setattr(
+        env_cfg.rewards,
+        reward_name,
+        _make_body_position_reward(weight=weight, std=std, body_names=T800_540_KICK_BODY_NAMES),
+    )
+
+
+def _add_540_kick_velocity_reward(env_cfg, weight: float, std: float, reward_name: str = "kick_right_vel"):
+    setattr(
+        env_cfg.rewards,
+        reward_name,
+        _make_body_linear_velocity_reward(weight=weight, std=std, body_names=T800_540_KICK_BODY_NAMES),
+    )
+
+
+def _add_540_support_leg_track_reward(
+    env_cfg,
+    weight: float,
+    std: float,
+    reward_name: str = "support_left_track",
+):
+    setattr(
+        env_cfg.rewards,
+        reward_name,
+        _make_body_position_reward(weight=weight, std=std, body_names=T800_540_SUPPORT_LEG_BODY_NAMES),
+    )
+
+
+def _add_540_retract_reward(env_cfg, weight: float, std: float, reward_name: str = "kick_right_retract"):
+    setattr(
+        env_cfg.rewards,
+        reward_name,
+        _make_phase_body_position_reward(
+            weight=weight,
+            std=std,
+            body_names=T800_540_KICK_LEG_BODY_NAMES,
+            phase_start=T800_540_RETRACT_PHASE[0],
+            phase_end=T800_540_RETRACT_PHASE[1],
+        ),
     )
 
 
@@ -161,6 +272,76 @@ class T800Flat540Huixuanti1AnchorRelaxEnvCfg(T800Flat540Huixuanti1EnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.terminations.anchor_pos.params["threshold"] = 0.8
+
+
+@configclass
+class T800Flat540Huixuanti1KickPosEnvCfg(T800Flat540Huixuanti1EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        _add_540_kick_position_reward(self, weight=1.2, std=0.18)
+
+
+@configclass
+class T800Flat540Huixuanti1KickVelEnvCfg(T800Flat540Huixuanti1EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        _add_540_kick_velocity_reward(self, weight=1.0, std=0.45)
+
+
+@configclass
+class T800Flat540Huixuanti1KickPosVelEnvCfg(T800Flat540Huixuanti1EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        _add_540_kick_position_reward(self, weight=0.9, std=0.18)
+        _add_540_kick_velocity_reward(self, weight=0.7, std=0.45)
+
+
+@configclass
+class T800Flat540Huixuanti1RetractPhaseEnvCfg(T800Flat540Huixuanti1EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        _add_540_retract_reward(self, weight=1.25, std=0.16)
+
+
+@configclass
+class T800Flat540Huixuanti1SupportLegTrackEnvCfg(T800Flat540Huixuanti1EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        _add_540_support_leg_track_reward(self, weight=0.9, std=0.20)
+
+
+@configclass
+class T800Flat540Huixuanti1KickSupportBalanceEnvCfg(T800Flat540Huixuanti1EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        _add_540_kick_position_reward(self, weight=0.8, std=0.18)
+        _add_540_kick_velocity_reward(self, weight=0.6, std=0.45)
+        _add_540_support_leg_track_reward(self, weight=0.7, std=0.20)
+        self.rewards.motion_body_pos.weight = 1.2
+
+
+@configclass
+class T800Flat540Huixuanti1KickPhaseOversampleEnvCfg(T800Flat540Huixuanti1EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        _set_540_phase_sampling_focus(self, kick_weight=4.0, retract_weight=2.5)
+
+
+@configclass
+class T800Flat540Huixuanti1KickPhaseAnchorRelaxEnvCfg(T800Flat540Huixuanti1EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        _set_540_phase_sampling_focus(self, kick_weight=4.0, retract_weight=2.5)
+        self.terminations.anchor_pos.params["threshold"] = 0.75
+
+
+@configclass
+class T800Flat540Huixuanti1KickPhasePrerollEnvCfg(T800Flat540Huixuanti1EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        _set_540_phase_sampling_focus(self, kick_weight=4.0, retract_weight=2.5)
+        self.commands.motion.reset_preroll_frames = 12
+        self.commands.motion.bridge_frames = 12
 
 
 @configclass

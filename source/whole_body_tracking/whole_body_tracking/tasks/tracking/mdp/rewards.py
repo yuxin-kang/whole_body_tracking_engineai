@@ -18,6 +18,14 @@ def _get_body_indexes(command: MotionCommand, body_names: list[str] | None) -> l
     return [i for i, name in enumerate(command.cfg.body_names) if (body_names is None) or (name in body_names)]
 
 
+def _get_phase_window_mask(command: MotionCommand, phase_start: float, phase_end: float) -> torch.Tensor:
+    if phase_end <= phase_start:
+        raise ValueError(f"Invalid phase window: [{phase_start}, {phase_end}]")
+    denom = max(command.motion.time_step_total - 1, 1)
+    phase = command.time_steps.to(dtype=torch.float32) / float(denom)
+    return ((phase >= phase_start) & (phase <= phase_end)).to(dtype=torch.float32)
+
+
 def motion_global_anchor_position_error_exp(env: ManagerBasedRLEnv, command_name: str, std: float) -> torch.Tensor:
     command: MotionCommand = env.command_manager.get_term(command_name)
     error = torch.sum(torch.square(command.anchor_pos_w - command.robot_anchor_pos_w), dim=-1)
@@ -73,6 +81,42 @@ def motion_global_body_angular_velocity_error_exp(
         torch.square(command.body_ang_vel_w[:, body_indexes] - command.robot_body_ang_vel_w[:, body_indexes]), dim=-1
     )
     return torch.exp(-error.mean(-1) / std**2)
+
+
+def phase_motion_relative_body_position_error_exp(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    std: float,
+    phase_start: float,
+    phase_end: float,
+    body_names: list[str] | None = None,
+) -> torch.Tensor:
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    reward = motion_relative_body_position_error_exp(
+        env=env,
+        command_name=command_name,
+        std=std,
+        body_names=body_names,
+    )
+    return reward * _get_phase_window_mask(command, phase_start=phase_start, phase_end=phase_end)
+
+
+def phase_motion_global_body_linear_velocity_error_exp(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    std: float,
+    phase_start: float,
+    phase_end: float,
+    body_names: list[str] | None = None,
+) -> torch.Tensor:
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    reward = motion_global_body_linear_velocity_error_exp(
+        env=env,
+        command_name=command_name,
+        std=std,
+        body_names=body_names,
+    )
+    return reward * _get_phase_window_mask(command, phase_start=phase_start, phase_end=phase_end)
 
 
 def feet_contact_time(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, threshold: float) -> torch.Tensor:

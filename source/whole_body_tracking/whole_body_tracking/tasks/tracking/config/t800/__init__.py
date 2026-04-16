@@ -73,6 +73,96 @@ gym.register(
 )
 
 gym.register(
+    id="Tracking-Flat-T800-540Huixuanti1-KickPos-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800Flat540Huixuanti1KickPosEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-540Huixuanti1-KickVel-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800Flat540Huixuanti1KickVelEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-540Huixuanti1-KickPosVel-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800Flat540Huixuanti1KickPosVelEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-540Huixuanti1-RetractPhase-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800Flat540Huixuanti1RetractPhaseEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-540Huixuanti1-SupportLegTrack-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800Flat540Huixuanti1SupportLegTrackEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-540Huixuanti1-KickSupportBalance-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800Flat540Huixuanti1KickSupportBalanceEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-540Huixuanti1-KickPhaseOversample-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800Flat540Huixuanti1KickPhaseOversampleEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-540Huixuanti1-KickPhaseAnchorRelax-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800Flat540Huixuanti1KickPhaseAnchorRelaxEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-540Huixuanti1-KickPhasePreroll-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800Flat540Huixuanti1KickPhasePrerollEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
     id="Tracking-Flat-T800-Zhiquan-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
