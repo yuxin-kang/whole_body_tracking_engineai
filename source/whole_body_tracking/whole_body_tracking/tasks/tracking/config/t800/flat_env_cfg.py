@@ -10,6 +10,52 @@ from whole_body_tracking.tasks.tracking.config.t800.agents.rsl_rl_ppo_cfg import
 from whole_body_tracking.tasks.tracking.tracking_env_cfg import TrackingEnvCfg
 
 
+T800_TRACKING_END_EFFECTOR_BODY_NAMES = [
+    "LINK_ANKLE_ROLL_L",
+    "LINK_ANKLE_ROLL_R",
+    "LINK_ELBOW_YAW_L",
+    "LINK_ELBOW_YAW_R",
+]
+T800_SUPPORT_FOOT_BODY_NAMES = ["LINK_ANKLE_ROLL_L", "LINK_ANKLE_ROLL_R"]
+
+
+def _make_end_effector_position_reward(weight: float, std: float) -> RewTerm:
+    return RewTerm(
+        func=mdp.motion_relative_body_position_error_exp,
+        weight=weight,
+        params={
+            "command_name": "motion",
+            "std": std,
+            "body_names": T800_TRACKING_END_EFFECTOR_BODY_NAMES,
+        },
+    )
+
+
+def _make_end_effector_linear_velocity_reward(weight: float, std: float) -> RewTerm:
+    return RewTerm(
+        func=mdp.motion_global_body_linear_velocity_error_exp,
+        weight=weight,
+        params={
+            "command_name": "motion",
+            "std": std,
+            "body_names": T800_TRACKING_END_EFFECTOR_BODY_NAMES,
+        },
+    )
+
+
+def _make_support_foot_com_reward(weight: float = 0.75, std: float = 0.18, force_threshold: float = 10.0) -> RewTerm:
+    return RewTerm(
+        func=mdp.support_foot_com_distance_reward,
+        weight=weight,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=T800_SUPPORT_FOOT_BODY_NAMES, preserve_order=True),
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=T800_SUPPORT_FOOT_BODY_NAMES, preserve_order=True),
+            "force_threshold": force_threshold,
+            "std": std,
+        },
+    )
+
+
 @configclass
 class T800FlatEnvCfg(TrackingEnvCfg):
     def __post_init__(self):
@@ -78,62 +124,43 @@ class T800FlatWoStateEstimationEnvCfg(T800FlatEnvCfg):
 class T800Flat540Huixuanti1EnvCfg(T800FlatEnvCfg):
     def __post_init__(self):
         super().__post_init__()
-        self.episode_length_s = 10
+        self.episode_length_s = 10.0
 
         self.commands.motion.min_traj_duration = self.episode_length_s
         self.commands.motion.bridge_frames = 20
         self.commands.motion.pd_stand_reset_ratio = 0.2
 
-        self.rewards.huixuanti_end_effector_pos = RewTerm(
-            func=mdp.motion_relative_body_position_error_exp,
-            weight=1.5,
-            params={
-                "command_name": "motion",
-                "std": 0.25,
-                "body_names": [
-                    "LINK_ANKLE_ROLL_L",
-                    "LINK_ANKLE_ROLL_R",
-                    "LINK_ELBOW_YAW_L",
-                    "LINK_ELBOW_YAW_R",
-                ],
-            },
-        )
-        self.rewards.huixuanti_end_effector_lin_vel = RewTerm(
-            func=mdp.motion_global_body_linear_velocity_error_exp,
-            weight=1.0,
-            params={
-                "command_name": "motion",
-                "std": 0.7,
-                "body_names": [
-                    "LINK_ANKLE_ROLL_L",
-                    "LINK_ANKLE_ROLL_R",
-                    "LINK_ELBOW_YAW_L",
-                    "LINK_ELBOW_YAW_R",
-                ],
-            },
-        )
-        self.rewards.support_foot_com = RewTerm(
-            func=mdp.support_foot_com_distance_reward,
-            weight=0.75,
-            params={
-                "asset_cfg": SceneEntityCfg(
-                    "robot",
-                    body_names=["LINK_ANKLE_ROLL_L", "LINK_ANKLE_ROLL_R"],
-                    preserve_order=True,
-                ),
-                "sensor_cfg": SceneEntityCfg(
-                    "contact_forces",
-                    body_names=["LINK_ANKLE_ROLL_L", "LINK_ANKLE_ROLL_R"],
-                    preserve_order=True,
-                ),
-                "force_threshold": 10.0,
-                "std": 0.18,
-            },
-        )
+        self.rewards.huixuanti_end_effector_pos = _make_end_effector_position_reward(weight=1.5, std=0.25)
+        self.rewards.huixuanti_end_effector_lin_vel = _make_end_effector_linear_velocity_reward(weight=1.0, std=0.7)
+        self.rewards.support_foot_com = _make_support_foot_com_reward()
 
         self.terminations.anchor_pos.params["threshold"] = 0.6
         self.terminations.anchor_ori.params["threshold"] = 1.6
         self.terminations.ee_body_pos = None
+
+
+@configclass
+class T800Flat540Huixuanti1LongClipEnvCfg(T800Flat540Huixuanti1EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.episode_length_s = 32.0
+        self.commands.motion.min_traj_duration = self.episode_length_s
+
+
+@configclass
+class T800Flat540Huixuanti1NoResetEnvCfg(T800Flat540Huixuanti1EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.commands.motion.bridge_frames = 0
+        self.commands.motion.pd_stand_reset_ratio = 0.0
+        self.commands.motion.reset_preroll_frames = 60
+
+
+@configclass
+class T800Flat540Huixuanti1AnchorRelaxEnvCfg(T800Flat540Huixuanti1EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.terminations.anchor_pos.params["threshold"] = 0.8
 
 
 @configclass
@@ -147,38 +174,28 @@ class T800FlatZhiquanEnvCfg(T800FlatEnvCfg):
         self.commands.motion.pd_stand_reset_ratio = 0.2
 
         self.rewards.action_rate_l2.weight = -0.02
-        self.rewards.zhiquan_end_effector_pos = RewTerm(
-            func=mdp.motion_relative_body_position_error_exp,
-            weight=2.5,
-            params={
-                "command_name": "motion",
-                "std": 0.15,
-                "body_names": [
-                    "LINK_ANKLE_ROLL_L",
-                    "LINK_ANKLE_ROLL_R",
-                    "LINK_ELBOW_YAW_L",
-                    "LINK_ELBOW_YAW_R",
-                ],
-            },
-        )
-        self.rewards.zhiquan_end_effector_lin_vel = RewTerm(
-            func=mdp.motion_global_body_linear_velocity_error_exp,
-            weight=1.5,
-            params={
-                "command_name": "motion",
-                "std": 0.4,
-                "body_names": [
-                    "LINK_ANKLE_ROLL_L",
-                    "LINK_ANKLE_ROLL_R",
-                    "LINK_ELBOW_YAW_L",
-                    "LINK_ELBOW_YAW_R",
-                ],
-            },
-        )
+        self.rewards.zhiquan_end_effector_pos = _make_end_effector_position_reward(weight=2.5, std=0.15)
+        self.rewards.zhiquan_end_effector_lin_vel = _make_end_effector_linear_velocity_reward(weight=1.5, std=0.4)
 
         self.terminations.anchor_pos.params["threshold"] = 0.4
         self.terminations.anchor_ori.params["threshold"] = 1.0
         self.terminations.ee_body_pos.params["threshold"] = 0.4
+
+
+@configclass
+class T800FlatZhiquanStdOnlyEnvCfg(T800FlatZhiquanEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.rewards.zhiquan_end_effector_pos = _make_end_effector_position_reward(weight=3.0, std=0.15)
+        self.rewards.zhiquan_end_effector_lin_vel = _make_end_effector_linear_velocity_reward(weight=2.0, std=0.4)
+
+
+@configclass
+class T800FlatZhiquanWeightOnlyEnvCfg(T800FlatZhiquanEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.rewards.zhiquan_end_effector_pos = _make_end_effector_position_reward(weight=2.5, std=0.2)
+        self.rewards.zhiquan_end_effector_lin_vel = _make_end_effector_linear_velocity_reward(weight=1.5, std=0.5)
 
 
 @configclass

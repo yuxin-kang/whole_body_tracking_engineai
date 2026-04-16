@@ -43,11 +43,61 @@ gym.register(
 )
 
 gym.register(
+    id="Tracking-Flat-T800-540Huixuanti1-LongClip-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800Flat540Huixuanti1LongClipEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-540Huixuanti1-NoReset-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800Flat540Huixuanti1NoResetEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-540Huixuanti1-AnchorRelax-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800Flat540Huixuanti1AnchorRelaxEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
     id="Tracking-Flat-T800-Zhiquan-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": flat_env_cfg.T800FlatZhiquanEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-Zhiquan-StdOnly-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800FlatZhiquanStdOnlyEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-Zhiquan-WeightOnly-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800FlatZhiquanWeightOnlyEnvCfg,
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
     },
 )
