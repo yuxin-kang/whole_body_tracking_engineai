@@ -18,6 +18,14 @@ def _get_body_indexes(command: MotionCommand, body_names: list[str] | None) -> l
     return [i for i, name in enumerate(command.cfg.body_names) if (body_names is None) or (name in body_names)]
 
 
+def _get_joint_indexes(command: MotionCommand, joint_names: list[str] | None) -> list[int]:
+    if joint_names is None:
+        return list(range(command.joint_pos.shape[1]))
+    if command.cfg.motion_joint_names is None:
+        raise ValueError("joint_names require MotionCommandCfg.motion_joint_names to be set")
+    return [command.cfg.motion_joint_names.index(name) for name in joint_names]
+
+
 def _get_phase_window_mask(command: MotionCommand, phase_start: float, phase_end: float) -> torch.Tensor:
     if phase_end <= phase_start:
         raise ValueError(f"Invalid phase window: [{phase_start}, {phase_end}]")
@@ -83,6 +91,27 @@ def motion_global_body_angular_velocity_error_exp(
     return torch.exp(-error.mean(-1) / std**2)
 
 
+def motion_global_anchor_xy_velocity_error_exp(env: ManagerBasedRLEnv, command_name: str, std: float) -> torch.Tensor:
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    error = torch.sum(torch.square(command.anchor_lin_vel_w[:, :2] - command.robot_anchor_lin_vel_w[:, :2]), dim=-1)
+    return torch.exp(-error / std**2)
+
+
+def phase_motion_joint_position_error_exp(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    std: float,
+    phase_start: float,
+    phase_end: float,
+    joint_names: list[str] | None = None,
+) -> torch.Tensor:
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    joint_indexes = _get_joint_indexes(command, joint_names)
+    error = torch.square(command.joint_pos[:, joint_indexes] - command.robot_joint_pos[:, joint_indexes])
+    reward = torch.exp(-error.mean(-1) / std**2)
+    return reward * _get_phase_window_mask(command, phase_start=phase_start, phase_end=phase_end)
+
+
 def phase_motion_relative_body_position_error_exp(
     env: ManagerBasedRLEnv,
     command_name: str,
@@ -115,6 +144,22 @@ def phase_motion_global_body_linear_velocity_error_exp(
         command_name=command_name,
         std=std,
         body_names=body_names,
+    )
+    return reward * _get_phase_window_mask(command, phase_start=phase_start, phase_end=phase_end)
+
+
+def phase_motion_global_anchor_xy_velocity_error_exp(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    std: float,
+    phase_start: float,
+    phase_end: float,
+) -> torch.Tensor:
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    reward = motion_global_anchor_xy_velocity_error_exp(
+        env=env,
+        command_name=command_name,
+        std=std,
     )
     return reward * _get_phase_window_mask(command, phase_start=phase_start, phase_end=phase_end)
 

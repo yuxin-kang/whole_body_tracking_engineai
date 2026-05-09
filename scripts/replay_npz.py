@@ -12,6 +12,9 @@ import argparse
 import numpy as np
 import torch
 import time
+import sys
+from importlib import util
+from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
@@ -20,11 +23,46 @@ parser = argparse.ArgumentParser(description="Replay converted motions.")
 parser.add_argument("--registry_name", type=str, default=None, help="The name of the wandb registry.")
 parser.add_argument("--input_file", type=str, default=None, help="Path to a local .npz motion file.")
 parser.add_argument("--robot", type=str, default="t800", choices=["pm01", "t800"], help="Robot type to use.")
+parser.add_argument(
+    "--report_540_landmarks_only",
+    action="store_true",
+    help="Print the T800 540 right-ankle landmark summary and exit.",
+)
+parser.add_argument(
+    "--announce_540_landmarks",
+    action="store_true",
+    help="Print the T800 540 right-ankle keyframe hits while replaying.",
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli = parser.parse_args()
+
+
+def _load_motion_landmarks_module():
+    module_path = (
+        Path(__file__).resolve().parents[1]
+        / "source"
+        / "whole_body_tracking"
+        / "whole_body_tracking"
+        / "utils"
+        / "motion_landmarks.py"
+    )
+    spec = util.spec_from_file_location("motion_landmarks", module_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+if args_cli.report_540_landmarks_only:
+    if args_cli.input_file is None:
+        raise ValueError("--input_file is required when using --report_540_landmarks_only.")
+    module = _load_motion_landmarks_module()
+    print(module.summarize_t800_right_ankle_540_landmarks(args_cli.input_file).format())
+    raise SystemExit(0)
 
 # launch omniverse app
 app_launcher = AppLauncher(args_cli)
@@ -149,6 +187,22 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         sim.device,
     )
     _print_replay_timing_summary(motion_file, motion, sim_dt)
+    landmark_report = None
+    landmark_hits = {}
+    announced_landmarks = set()
+    if args_cli.announce_540_landmarks:
+        if args_cli.robot != "t800":
+            raise ValueError("--announce_540_landmarks is only supported for --robot t800.")
+        landmark_module = _load_motion_landmarks_module()
+        landmark_report = landmark_module.summarize_t800_right_ankle_540_landmarks(motion_file)
+        landmark_hits = {
+            landmark_report.qishi_end: "qishi_end",
+            landmark_report.pre_peak_local_min: "pre_peak_local_min",
+            landmark_report.peak_frame: "peak_frame",
+            landmark_report.post_peak_local_min: "post_peak_local_min",
+            landmark_report.return_zero_end: "return_zero_end",
+        }
+        print(landmark_report.format())
     motion_joint_names = ROBOT_MOTION_JOINT_NAMES.get(args_cli.robot)
     robot_joint_indexes = None
     if motion_joint_names is not None:
@@ -165,6 +219,10 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     # Simulation loop
     while simulation_app.is_running():
         time_steps += 1
+        current_step = int(time_steps[0].item())
+        if landmark_report is not None and current_step in landmark_hits and current_step not in announced_landmarks:
+            print(f"[INFO] 540 keyframe hit: {landmark_hits[current_step]}={current_step}")
+            announced_landmarks.add(current_step)
         reset_ids = time_steps >= motion.time_step_total
         if torch.any(reset_ids) and not wall_clock_reported:
             wall_clock_cycle_duration_s = time.perf_counter() - cycle_wall_clock_start

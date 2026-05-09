@@ -38,4 +38,9 @@ _build
 
 **/data/*
 **/tests/*
+!tests/test_540_kick_phase_landmarks.py
+!tests/test_540_phase_curriculum_momentum_variants.py
 .omx/
+**/exp/*
+!exp/
+!exp/4.19-phase-curriculum-momentum-followups.md
