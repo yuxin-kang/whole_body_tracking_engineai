@@ -164,6 +164,12 @@ def _make_support_foot_com_reward(weight: float = 0.75, std: float = 0.18, force
     )
 
 
+def _disable_early_terminations(env_cfg):
+    env_cfg.terminations.anchor_pos = None
+    env_cfg.terminations.anchor_ori = None
+    env_cfg.terminations.ee_body_pos = None
+
+
 @configclass
 class T800FlatEnvCfg(TrackingEnvCfg):
     def __post_init__(self):
@@ -250,6 +256,29 @@ class T800Flat540Huixuanti1EnvCfg(T800FlatEnvCfg):
 
 
 @configclass
+class T800Flat540Huixuanti1Start0EnvCfg(T800Flat540Huixuanti1EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.commands.motion.play_from_start = True
+        self.commands.motion.resample_at_motion_end = False
+        self.commands.motion.pd_stand_reset_ratio = 0.0
+
+
+@configclass
+class T800Flat540Huixuanti1NoEarlyTerminationsEnvCfg(T800Flat540Huixuanti1EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        _disable_early_terminations(self)
+
+
+@configclass
+class T800Flat540Huixuanti1OrigEpisodeEnvCfg(T800Flat540Huixuanti1EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.episode_length_s = 10.0
+
+
+@configclass
 class T800Flat540Huixuanti1KickVelKickPosEnvCfg(T800Flat540Huixuanti1EnvCfg):
     def __post_init__(self):
         super().__post_init__()
@@ -282,6 +311,22 @@ class T800FlatZhiquanEnvCfg(T800FlatEnvCfg):
         self.terminations.anchor_pos.params["threshold"] = 0.4
         self.terminations.anchor_ori.params["threshold"] = 1.0
         self.terminations.ee_body_pos.params["threshold"] = 0.4
+
+
+@configclass
+class T800FlatZhiquanOrigEpisodeEnvCfg(T800FlatZhiquanEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.episode_length_s = 23.0
+
+
+@configclass
+class T800FlatZhiquanBridgeEnvCfg(T800FlatZhiquanEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.episode_length_s = 24.0
+        self.commands.motion.min_traj_duration = self.episode_length_s
+        self.commands.motion.bridge_frames = 20
 
 
 @configclass

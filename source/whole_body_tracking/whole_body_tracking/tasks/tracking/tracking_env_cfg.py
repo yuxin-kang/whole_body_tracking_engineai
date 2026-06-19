@@ -186,7 +186,7 @@ class EventCfg:
     push_robot = EventTerm(
         func=mdp.push_by_setting_velocity,
         mode="interval",
-        interval_range_s=(1.0, 3.0),
+        interval_range_s=(5.0, 10.0),  # paper-aligned push interval (was (1.0, 3.0))
         params={"velocity_range": VELOCITY_RANGE},
     )
 
@@ -252,18 +252,18 @@ class TerminationsCfg:
 
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     anchor_pos = DoneTerm(
-        func=mdp.bad_anchor_pos_z_only,
-        params={"command_name": "motion", "threshold": 0.25},
+        func=mdp.bad_anchor_pos,  # paper-aligned: full 3D L2 (was bad_anchor_pos_z_only)
+        params={"command_name": "motion", "threshold": 0.5},
     )
     anchor_ori = DoneTerm(
         func=mdp.bad_anchor_ori,
         params={"asset_cfg": SceneEntityCfg("robot"), "command_name": "motion", "threshold": 0.8},
     )
     ee_body_pos = DoneTerm(
-        func=mdp.bad_motion_body_pos_z_only,
+        func=mdp.bad_motion_body_pos,  # paper-aligned: full 3D L2 (was bad_motion_body_pos_z_only)
         params={
             "command_name": "motion",
-            "threshold": 0.25,
+            "threshold": 0.5,
             "body_names": [
                 "left_ankle_roll_link",
                 "right_ankle_roll_link",

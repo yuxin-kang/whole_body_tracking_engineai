@@ -20,6 +20,8 @@
 # Outputs
 **/runs/*
 **/logs/*
+!docs/logs/
+!docs/logs/*.md
 **/recordings/*
 **/output/*
 **/outputs/*
@@ -38,9 +40,21 @@ _build
 
 **/data/*
 **/tests/*
+!data/
+!data/g1/
+!data/g1/1307.npz
+!data/g1/robot_init_states_8192.pth
 !tests/test_540_kick_phase_landmarks.py
 !tests/test_540_phase_curriculum_momentum_variants.py
+!tests/test_540_start0_single_episode.py
+!tests/test_540_no_early_terminations.py
+!tests/test_g1_kungfu_1307_config.py
 .omx/
 **/exp/*
+**/slurm_logs/*
+tensorboard_logs/
+claude/dbg_logs/
 !exp/
 !exp/4.19-phase-curriculum-momentum-followups.md
+source/whole_body_tracking/whole_body_tracking/assets/g1/usd_cache/
+source/whole_body_tracking/whole_body_tracking/assets/g1_description/urdf/usd_cache/

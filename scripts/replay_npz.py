@@ -22,7 +22,7 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="Replay converted motions.")
 parser.add_argument("--registry_name", type=str, default=None, help="The name of the wandb registry.")
 parser.add_argument("--input_file", type=str, default=None, help="Path to a local .npz motion file.")
-parser.add_argument("--robot", type=str, default="t800", choices=["pm01", "t800"], help="Robot type to use.")
+parser.add_argument("--robot", type=str, default="t800", choices=["pm01", "t800", "g1"], help="Robot type to use.")
 parser.add_argument(
     "--report_540_landmarks_only",
     action="store_true",
@@ -81,12 +81,15 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 # Pre-defined configs
 ##
 from whole_body_tracking.robots.pm01 import PM01_CYLINDER_CFG
+from whole_body_tracking.robots.g1 import G1_CFG
 from whole_body_tracking.robots.t800 import T800_CFG
+from whole_body_tracking.tasks.tracking.config.g1.g1_mdp import G1_MOTION_JOINT_NAMES
 from whole_body_tracking.tasks.tracking.mdp import MotionLoader
 
 ROBOT_CFGS = {
     "pm01": PM01_CYLINDER_CFG,
     "t800": T800_CFG,
+    "g1": G1_CFG,
 }
 
 T800_MOTION_JOINT_NAMES = [
@@ -119,6 +122,7 @@ T800_MOTION_JOINT_NAMES = [
 
 ROBOT_MOTION_JOINT_NAMES = {
     "t800": T800_MOTION_JOINT_NAMES,
+    "g1": G1_MOTION_JOINT_NAMES,
 }
 
 
@@ -157,6 +161,22 @@ def _print_replay_timing_summary(motion_file: str, motion: MotionLoader, sim_dt:
         print(
             "  WARN: metadata_fps differs from logical_replay_fps, so file metadata and replay cadence do not match."
         )
+
+
+def assemble_replay_root_states(
+    default_root_state: torch.Tensor,
+    motion_root_pos_w: torch.Tensor,
+    motion_root_quat_w: torch.Tensor,
+    motion_root_lin_vel_w: torch.Tensor,
+    motion_root_ang_vel_w: torch.Tensor,
+    env_origins: torch.Tensor,
+) -> torch.Tensor:
+    root_states = default_root_state.clone()
+    root_states[:, :3] = motion_root_pos_w + env_origins
+    root_states[:, 3:7] = motion_root_quat_w
+    root_states[:, 7:10] = motion_root_lin_vel_w
+    root_states[:, 10:] = motion_root_ang_vel_w
+    return root_states
 
 
 def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
@@ -230,11 +250,14 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             wall_clock_reported = True
         time_steps[reset_ids] = 0
 
-        root_states = robot.data.default_root_state.clone()
-        root_states[:, :3] = motion.body_pos_w[time_steps][:, 0] + scene.env_origins[:, None, :]
-        root_states[:, 3:7] = motion.body_quat_w[time_steps][:, 0]
-        root_states[:, 7:10] = motion.body_lin_vel_w[time_steps][:, 0]
-        root_states[:, 10:] = motion.body_ang_vel_w[time_steps][:, 0]
+        root_states = assemble_replay_root_states(
+            robot.data.default_root_state,
+            motion.body_pos_w[time_steps][:, 0],
+            motion.body_quat_w[time_steps][:, 0],
+            motion.body_lin_vel_w[time_steps][:, 0],
+            motion.body_ang_vel_w[time_steps][:, 0],
+            scene.env_origins,
+        )
 
         robot.write_root_state_to_sim(root_states)
         if robot_joint_indexes is None:

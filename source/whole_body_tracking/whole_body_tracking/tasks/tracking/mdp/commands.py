@@ -6,7 +6,8 @@ import os
 import torch
 from collections.abc import Sequence
 from dataclasses import MISSING
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
 from isaaclab.assets import Articulation
 from isaaclab.managers import CommandTerm, CommandTermCfg
@@ -25,6 +26,14 @@ from isaaclab.utils.math import (
 )
 
 from whole_body_tracking.tasks.tracking.debug_utils import collect_ee_body_violations
+from whole_body_tracking.tasks.tracking.mdp.lke import (
+    assign_lke_failure_to_previous_anchor,
+    compute_lke_anchor_probabilities,
+    compute_reference_joint_velocity_energy,
+    detect_lke_anchor_indexes,
+    initialize_lke_anchor_weights,
+    update_lke_anchor_weights,
+)
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -75,6 +84,40 @@ def _bridge_quat_sequence(last_quat: torch.Tensor, first_quat: torch.Tensor, bri
     return torch.stack(bridge, dim=0)
 
 
+def _select_standing_init_pool_indexes(root_states_xyzw: torch.Tensor, dof_pos: torch.Tensor, num_select: int) -> torch.Tensor:
+    from whole_body_tracking.tasks.tracking.config.g1.grsi import select_diverse_grsi_pool_indexes
+
+    count = root_states_xyzw.shape[0]
+    num_select = min(int(num_select), count)
+    if num_select <= 0:
+        return torch.empty(0, dtype=torch.long, device=root_states_xyzw.device)
+    return select_diverse_grsi_pool_indexes(root_states_xyzw, dof_pos, num_select)
+
+
+def _validate_grsi_init_data_if_present(
+    init_robot_data: dict,
+    init_pos_file: str,
+    expected_joint_names: Sequence[str] | None,
+) -> None:
+    if "version" not in init_robot_data or "generation_config" not in init_robot_data:
+        return
+
+    from whole_body_tracking.tasks.tracking.config.g1.grsi import (
+        validate_grsi_production_contract,
+        validate_grsi_state_dict,
+    )
+
+    try:
+        validate_grsi_state_dict(
+            init_robot_data,
+            expected_joint_names=list(expected_joint_names) if expected_joint_names is not None else None,
+        )
+        if Path(init_pos_file).name == "grsi_states.pth":
+            validate_grsi_production_contract(init_robot_data, init_pos_file)
+    except ValueError as exc:
+        raise ValueError(f"Invalid GRSI standing init state file {init_pos_file}: {exc}") from exc
+
+
 class MotionLoader:
     def __init__(
         self,
@@ -83,6 +126,7 @@ class MotionLoader:
         device: str = "cpu",
         min_traj_duration: float | None = None,
         bridge_frames: int = 20,
+        compute_kinetic_energy: bool = False,
     ):
         assert os.path.isfile(motion_file), f"Invalid file path: {motion_file}"
         data = np.load(motion_file)
@@ -112,6 +156,15 @@ class MotionLoader:
         self._body_ang_vel_w = motion_tensors["body_ang_vel_w"]
         self._body_indexes = body_indexes
         self.time_step_total = self.joint_pos.shape[0]
+        if compute_kinetic_energy:
+            kinetic_energy = compute_reference_joint_velocity_energy(self.joint_vel)
+            self.kinetic_energy = kinetic_energy
+            self.lke_anchor_indexes = detect_lke_anchor_indexes(kinetic_energy)
+            self.lke_anchor_weights = initialize_lke_anchor_weights(
+                self.lke_anchor_indexes,
+                initial_weight=1.0,
+            )
+            self.kinetic_energy_prob = compute_lke_anchor_probabilities(self.lke_anchor_weights)
 
     def _extend_short_trajectory(
         self,
@@ -183,8 +236,11 @@ class MotionCommand(CommandTerm):
 
         self.robot: Articulation = env.scene[cfg.asset_name]
         self.robot_anchor_body_index = self.robot.body_names.index(self.cfg.anchor_body_name)
+        self.root_body_name = self.cfg.root_body_name or self.cfg.anchor_body_name
+        self.robot_root_body_index = self.robot.body_names.index(self.root_body_name)
         motion_body_names = self.cfg.motion_body_names if self.cfg.motion_body_names is not None else self.cfg.body_names
         self.motion_anchor_body_index = self.cfg.body_names.index(self.cfg.anchor_body_name)
+        self.motion_root_body_index = self.cfg.body_names.index(self.root_body_name)
         self.body_indexes = torch.tensor(
             self.robot.find_bodies(self.cfg.body_names, preserve_order=True)[0], dtype=torch.long, device=self.device
         )
@@ -207,8 +263,10 @@ class MotionCommand(CommandTerm):
             device=self.device,
             min_traj_duration=self.cfg.min_traj_duration,
             bridge_frames=self.cfg.bridge_frames,
+            compute_kinetic_energy=self.cfg.sampling_mode == "lke",
         )
         self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.is_standing_task = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.body_pos_relative_w = torch.zeros(self.num_envs, len(cfg.body_names), 3, device=self.device)
         self.body_quat_relative_w = torch.zeros(self.num_envs, len(cfg.body_names), 4, device=self.device)
         self.body_quat_relative_w[:, :, 0] = 1.0
@@ -225,7 +283,7 @@ class MotionCommand(CommandTerm):
         self._termination_debug_body_pos_error = torch.zeros(
             self.num_envs, len(cfg.body_names), dtype=torch.float32, device=self.device
         )
-        self._play_from_start = False
+        self._play_from_start = bool(self.cfg.play_from_start)
 
         self.metrics["error_anchor_pos"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["error_anchor_rot"] = torch.zeros(self.num_envs, device=self.device)
@@ -284,6 +342,22 @@ class MotionCommand(CommandTerm):
         return self.motion.body_ang_vel_w[self.time_steps, self.motion_anchor_body_index]
 
     @property
+    def root_pos_w(self) -> torch.Tensor:
+        return self.motion.body_pos_w[self.time_steps, self.motion_root_body_index] + self._env.scene.env_origins
+
+    @property
+    def root_quat_w(self) -> torch.Tensor:
+        return self.motion.body_quat_w[self.time_steps, self.motion_root_body_index]
+
+    @property
+    def root_lin_vel_w(self) -> torch.Tensor:
+        return self.motion.body_lin_vel_w[self.time_steps, self.motion_root_body_index]
+
+    @property
+    def root_ang_vel_w(self) -> torch.Tensor:
+        return self.motion.body_ang_vel_w[self.time_steps, self.motion_root_body_index]
+
+    @property
     def robot_joint_pos(self) -> torch.Tensor:
         if self.robot_joint_indexes is None:
             return self.robot.data.joint_pos
@@ -326,6 +400,22 @@ class MotionCommand(CommandTerm):
     @property
     def robot_anchor_ang_vel_w(self) -> torch.Tensor:
         return self.robot.data.body_ang_vel_w[:, self.robot_anchor_body_index]
+
+    @property
+    def robot_root_pos_w(self) -> torch.Tensor:
+        return self.robot.data.body_pos_w[:, self.robot_root_body_index]
+
+    @property
+    def robot_root_quat_w(self) -> torch.Tensor:
+        return self.robot.data.body_quat_w[:, self.robot_root_body_index]
+
+    @property
+    def robot_root_lin_vel_w(self) -> torch.Tensor:
+        return self.robot.data.body_lin_vel_w[:, self.robot_root_body_index]
+
+    @property
+    def robot_root_ang_vel_w(self) -> torch.Tensor:
+        return self.robot.data.body_ang_vel_w[:, self.robot_root_body_index]
 
     def _update_metrics(self):
         self.metrics["error_anchor_pos"] = torch.norm(self.anchor_pos_w - self.robot_anchor_pos_w, dim=-1)
@@ -390,11 +480,64 @@ class MotionCommand(CommandTerm):
 
         # Metrics
         H = -(sampling_probabilities * (sampling_probabilities + 1e-12).log()).sum()
-        H_norm = H / math.log(self.bin_count)
+        H_norm = H / math.log(self.bin_count) if self.bin_count > 1 else torch.ones((), device=self.device)
         pmax, imax = sampling_probabilities.max(dim=0)
         self.metrics["sampling_entropy"][:] = H_norm
         self.metrics["sampling_top1_prob"][:] = pmax
         self.metrics["sampling_top1_bin"][:] = imax.float() / self.bin_count
+
+    def _uniform_sampling(self, env_ids: torch.Tensor):
+        self.time_steps[env_ids] = torch.randint(
+            0,
+            self.motion.time_step_total,
+            (len(env_ids),),
+            device=self.device,
+        )
+        self.metrics["sampling_entropy"][:] = 1.0
+        self.metrics["sampling_top1_prob"][:] = 1.0 / max(self.bin_count, 1)
+        self.metrics["sampling_top1_bin"][:] = 0.5
+
+    def _lke_sampling(self, env_ids: torch.Tensor):
+        if not hasattr(self.motion, "lke_anchor_indexes"):
+            raise RuntimeError("LKE sampling requires MotionLoader(compute_kinetic_energy=True).")
+        episode_failed = self._env.termination_manager.terminated[env_ids]
+        if torch.any(episode_failed):
+            failed_steps = self.time_steps[env_ids][episode_failed]
+            self.motion.lke_anchor_weights = update_lke_anchor_weights(
+                self.motion.lke_anchor_weights,
+                failed_steps,
+                self.motion.lke_anchor_indexes,
+                alpha=0.2,
+                w_min=1.0,
+                w_max=8.0,
+            )
+
+        sampling_probabilities = compute_lke_anchor_probabilities(self.motion.lke_anchor_weights)
+        sampled_anchor_positions = torch.multinomial(
+            sampling_probabilities,
+            env_ids.numel(),
+            replacement=True,
+        )
+        self.time_steps[env_ids] = self.motion.lke_anchor_indexes[sampled_anchor_positions]
+
+        h_norm = -(sampling_probabilities * (sampling_probabilities + 1e-12).log()).sum()
+        h_norm = h_norm / math.log(sampling_probabilities.numel()) if sampling_probabilities.numel() > 1 else h_norm
+        pmax, imax = sampling_probabilities.max(dim=0)
+        self.metrics["sampling_entropy"][:] = h_norm
+        self.metrics["sampling_top1_prob"][:] = pmax
+        self.metrics["sampling_top1_bin"][:] = self.motion.lke_anchor_indexes[imax].float() / max(
+            self.motion.time_step_total, 1
+        )
+
+    def _sample_time_steps(self, env_ids: torch.Tensor):
+        if self._play_from_start or self.cfg.sampling_mode == "start":
+            self.time_steps[env_ids] = 0
+        elif self.cfg.sampling_mode == "uniform":
+            self._uniform_sampling(env_ids)
+        elif self.cfg.sampling_mode == "lke":
+            self._lke_sampling(env_ids)
+        else:
+            self._adaptive_sampling(env_ids)
 
     def update_termination_debug_anchor_pos(self, error: torch.Tensor):
         self._termination_debug_anchor_pos_error.copy_(error.detach())
@@ -549,10 +692,10 @@ class MotionCommand(CommandTerm):
         if env_ids.numel() == 0:
             return
 
-        root_pos = self.anchor_pos_w[env_ids].clone()
-        root_ori = self.anchor_quat_w[env_ids].clone()
-        root_lin_vel = self.anchor_lin_vel_w[env_ids].clone()
-        root_ang_vel = self.anchor_ang_vel_w[env_ids].clone()
+        root_pos = self.root_pos_w[env_ids].clone()
+        root_ori = self.root_quat_w[env_ids].clone()
+        root_lin_vel = self.root_lin_vel_w[env_ids].clone()
+        root_ang_vel = self.root_ang_vel_w[env_ids].clone()
 
         range_list = [self.cfg.pose_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]]
         ranges = torch.tensor(range_list, device=self.device)
@@ -608,11 +751,11 @@ class MotionCommand(CommandTerm):
             return
         env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
         if self._play_from_start:
-            self.time_steps[env_ids] = 0
+            self._sample_time_steps(env_ids)
             self._reset_envs_from_motion(env_ids)
             self._refresh_relative_motion_state(env_ids)
             return
-        self._adaptive_sampling(env_ids)
+        self._sample_time_steps(env_ids)
         if self.cfg.reset_preroll_frames > 0:
             self.time_steps[env_ids] = torch.clamp(
                 self.time_steps[env_ids] - self.cfg.reset_preroll_frames,
@@ -636,13 +779,19 @@ class MotionCommand(CommandTerm):
     def _update_command(self):
         self.time_steps += 1
         env_ids = torch.where(self.time_steps >= self.motion.time_step_total)[0]
-        self._resample_command(env_ids)
+        if len(env_ids) > 0:
+            if self.cfg.resample_at_motion_end:
+                self._resample_command(env_ids)
+            else:
+                self.time_steps[env_ids] = self.motion.time_step_total - 1
         self._refresh_relative_motion_state()
 
-        self.bin_failed_count = (
-            self.cfg.adaptive_alpha * self._current_bin_failed + (1 - self.cfg.adaptive_alpha) * self.bin_failed_count
-        )
-        self._current_bin_failed.zero_()
+        if self.cfg.sampling_mode == "adaptive":
+            self.bin_failed_count = (
+                self.cfg.adaptive_alpha * self._current_bin_failed
+                + (1 - self.cfg.adaptive_alpha) * self.bin_failed_count
+            )
+            self._current_bin_failed.zero_()
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         if debug_vis:
@@ -694,6 +843,149 @@ class MotionCommand(CommandTerm):
             self.goal_body_visualizers[i].visualize(self.body_pos_w[:, i], self.body_quat_w[:, i])
 
 
+class MotionStandingCommand(MotionCommand):
+    cfg: MotionStandingCommandCfg
+
+    def __init__(self, cfg: MotionStandingCommandCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        if not os.path.exists(cfg.init_pos_file):
+            raise FileNotFoundError(f"Can't find standing init state file: {cfg.init_pos_file}")
+
+        self.init_robot_data = torch.load(cfg.init_pos_file, map_location="cpu", weights_only=True)
+        expected_joint_names = (
+            list(self.cfg.motion_joint_names) if self.cfg.motion_joint_names is not None else None
+        )
+        _validate_grsi_init_data_if_present(self.init_robot_data, cfg.init_pos_file, expected_joint_names)
+        expected_joint_count = len(expected_joint_names) if expected_joint_names is not None else self.robot.num_joints
+        dof_pos = self.init_robot_data["dof_pos"]
+        if dof_pos.ndim != 2 or dof_pos.shape[1] != expected_joint_count:
+            raise ValueError(
+                f"Standing init dof_pos must have shape (N, {expected_joint_count}); got {tuple(dof_pos.shape)}."
+            )
+        dof_vel = self.init_robot_data.get("dof_vel")
+        if dof_vel is not None and (dof_vel.ndim != 2 or dof_vel.shape[1] != expected_joint_count):
+            raise ValueError(
+                f"Standing init dof_vel must have shape (N, {expected_joint_count}); got {tuple(dof_vel.shape)}."
+            )
+        root_states_xyzw = self.init_robot_data["robot_root_states_xyzw"]
+        if root_states_xyzw.ndim != 2 or root_states_xyzw.shape[1] < 13:
+            raise ValueError(
+                f"Standing init robot_root_states_xyzw must have shape (N, >=13); got {tuple(root_states_xyzw.shape)}."
+            )
+        pool_size = min(self.cfg.standing_init_sample_pool_size, root_states_xyzw.shape[0])
+        self.standing_init_pool_ids = _select_standing_init_pool_indexes(root_states_xyzw, dof_pos, pool_size).cpu()
+
+        self.is_standing_task = torch.multinomial(
+            torch.tensor(cfg.tracking_standing_weight, device=self.device, dtype=torch.float32),
+            num_samples=self.num_envs,
+            replacement=True,
+        ).bool()
+        self.prev_anchor_pos = torch.zeros_like(self.robot_anchor_pos_w)
+        self.current_anchor_pos = self.robot_anchor_pos_w.clone()
+        self.root_indexes = [self.cfg.body_names.index(name) for name in self.cfg.root_body_names]
+        self.root_index = self.root_indexes[0] if self.root_indexes else self.motion_root_body_index
+        self.shoulders_indexes = [self.cfg.body_names.index(name) for name in self.cfg.shoulders_body_names]
+        self.feet_indexes = [self.cfg.body_names.index(name) for name in self.cfg.feet_body_names]
+
+    def _sample_standing_init(self, count: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.standing_init_pool_ids.numel() > 0:
+            pool_indexes = torch.randint(0, self.standing_init_pool_ids.numel(), (count,))
+            sampled_ids = self.standing_init_pool_ids[pool_indexes].long()
+        else:
+            sampled_ids = torch.randint(0, self.init_robot_data["robot_root_states_xyzw"].shape[0], (count,))
+
+        root_states_xyzw = self.init_robot_data["robot_root_states_xyzw"][sampled_ids].to(self.device)
+        dof_pos = self.init_robot_data["dof_pos"][sampled_ids].to(self.device)
+        dof_vel = self.init_robot_data.get("dof_vel")
+        if dof_vel is None:
+            dof_vel = torch.zeros_like(dof_pos)
+        else:
+            dof_vel = dof_vel[sampled_ids].to(self.device)
+        return root_states_xyzw, dof_pos, dof_vel
+
+    def _write_standing_or_motion_state(self, env_ids: torch.Tensor, standing_mask: torch.Tensor):
+        if env_ids.numel() == 0:
+            return
+
+        root_pos = self.root_pos_w[env_ids].clone()
+        root_ori = self.root_quat_w[env_ids].clone()
+        root_lin_vel = self.root_lin_vel_w[env_ids].clone()
+        root_ang_vel = self.root_ang_vel_w[env_ids].clone()
+
+        range_list = [self.cfg.pose_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]]
+        ranges = torch.tensor(range_list, device=self.device)
+        rand_samples = sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=self.device)
+        root_pos += rand_samples[:, 0:3]
+        orientations_delta = quat_from_euler_xyz(rand_samples[:, 3], rand_samples[:, 4], rand_samples[:, 5])
+        root_ori = quat_mul(orientations_delta, root_ori)
+
+        range_list = [self.cfg.velocity_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]]
+        ranges = torch.tensor(range_list, device=self.device)
+        rand_samples = sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=self.device)
+        root_lin_vel += rand_samples[:, :3]
+        root_ang_vel += rand_samples[:, 3:]
+
+        joint_pos = self.joint_pos[env_ids].clone()
+        joint_vel = self.joint_vel[env_ids].clone()
+        joint_pos += sample_uniform(*self.cfg.joint_position_range, joint_pos.shape, joint_pos.device)
+
+        standing_root_xyzw, standing_joint_pos, standing_joint_vel = self._sample_standing_init(len(env_ids))
+        if standing_mask.any():
+            root_pos = torch.where(
+                standing_mask.unsqueeze(1),
+                torch.cat([root_pos[:, :2], standing_root_xyzw[:, 2:3]], dim=1),
+                root_pos,
+            )
+            root_ori = torch.where(
+                standing_mask.unsqueeze(1),
+                torch.cat([standing_root_xyzw[:, 6:7], standing_root_xyzw[:, 3:6]], dim=1),
+                root_ori,
+            )
+            root_lin_vel = torch.where(standing_mask.unsqueeze(1), standing_root_xyzw[:, 7:10], root_lin_vel)
+            root_ang_vel = torch.where(standing_mask.unsqueeze(1), standing_root_xyzw[:, 10:13], root_ang_vel)
+
+            joint_pos = torch.where(standing_mask.unsqueeze(1), standing_joint_pos, joint_pos)
+            joint_vel = torch.where(standing_mask.unsqueeze(1), standing_joint_vel, joint_vel)
+
+        if self.robot_joint_indexes is None:
+            soft_joint_pos_limits = self.robot.data.soft_joint_pos_limits[env_ids]
+            joint_pos = torch.clip(joint_pos, soft_joint_pos_limits[:, :, 0], soft_joint_pos_limits[:, :, 1])
+            self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
+        else:
+            full_joint_pos = self.robot.data.default_joint_pos[env_ids].clone()
+            full_joint_vel = self.robot.data.default_joint_vel[env_ids].clone()
+            soft_joint_pos_limits = self.robot.data.soft_joint_pos_limits[env_ids][:, self.robot_joint_indexes]
+            clipped_joint_pos = torch.clip(joint_pos, soft_joint_pos_limits[:, :, 0], soft_joint_pos_limits[:, :, 1])
+            full_joint_pos[:, self.robot_joint_indexes] = clipped_joint_pos
+            full_joint_vel[:, self.robot_joint_indexes] = joint_vel
+            self.robot.write_joint_state_to_sim(full_joint_pos, full_joint_vel, env_ids=env_ids)
+
+        root_state = torch.cat([root_pos, root_ori, root_lin_vel, root_ang_vel], dim=-1)
+        self.robot.write_root_state_to_sim(root_state, env_ids=env_ids)
+
+    def _resample_command(self, env_ids: Sequence[int]):
+        if len(env_ids) == 0:
+            return
+        env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
+        self._sample_time_steps(env_ids)
+        if self.cfg.reset_preroll_frames > 0:
+            self.time_steps[env_ids] = torch.clamp(self.time_steps[env_ids] - self.cfg.reset_preroll_frames, min=0)
+
+        standing_mask = torch.multinomial(
+            torch.tensor(self.cfg.tracking_standing_weight, device=self.device, dtype=torch.float32),
+            num_samples=env_ids.numel(),
+            replacement=True,
+        ).bool()
+        self.is_standing_task[env_ids] = standing_mask
+        self._write_standing_or_motion_state(env_ids, standing_mask)
+        self._refresh_relative_motion_state(env_ids)
+
+    def _update_command(self):
+        self.prev_anchor_pos[:] = self.current_anchor_pos
+        super()._update_command()
+        self.current_anchor_pos[:] = self.robot_anchor_pos_w
+
+
 @configclass
 class MotionCommandCfg(CommandTermCfg):
     """Configuration for the motion command."""
@@ -704,6 +996,7 @@ class MotionCommandCfg(CommandTermCfg):
 
     motion_file: str = MISSING
     anchor_body_name: str = MISSING
+    root_body_name: str | None = None
     body_names: list[str] = MISSING
     motion_body_names: list[str] | None = None
     motion_joint_names: list[str] | None = None
@@ -719,12 +1012,29 @@ class MotionCommandCfg(CommandTermCfg):
     adaptive_lambda: float = 0.8
     adaptive_uniform_ratio: float = 0.1
     adaptive_alpha: float = 0.001
+    sampling_mode: Literal["adaptive", "uniform", "start", "lke"] = "adaptive"
     phase_sampling_windows: list[tuple[float, float, float]] = []
     pd_stand_reset_ratio: float = 0.0
     reset_preroll_frames: int = 0
+    play_from_start: bool = False
+    resample_at_motion_end: bool = True
 
     anchor_visualizer_cfg: VisualizationMarkersCfg = FRAME_MARKER_CFG.replace(prim_path="/Visuals/Command/pose")
     anchor_visualizer_cfg.markers["frame"].scale = (0.2, 0.2, 0.2)
 
     body_visualizer_cfg: VisualizationMarkersCfg = FRAME_MARKER_CFG.replace(prim_path="/Visuals/Command/pose")
     body_visualizer_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
+
+
+@configclass
+class MotionStandingCommandCfg(MotionCommandCfg):
+    """Motion command that can reset a subset of envs from sampled standing states."""
+
+    class_type: type = MotionStandingCommand
+
+    init_pos_file: str = MISSING
+    root_body_names: list[str] = []
+    shoulders_body_names: list[str] = []
+    feet_body_names: list[str] = []
+    tracking_standing_weight: tuple[float, float] = (1.0, 1.0)
+    standing_init_sample_pool_size: int = 2048
