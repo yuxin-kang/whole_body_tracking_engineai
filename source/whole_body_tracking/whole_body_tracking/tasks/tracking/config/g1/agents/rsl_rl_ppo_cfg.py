@@ -2,6 +2,19 @@ from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
 
 
+def _actor_critic_cfg(**kwargs) -> RslRlPpoActorCriticCfg:
+    """Keep per-network normalization on versions that expose those fields."""
+    supported_fields = {
+        field_name
+        for config_type in RslRlPpoActorCriticCfg.__mro__
+        for field_name in getattr(config_type, "__annotations__", {})
+    }
+    for field_name in ("actor_obs_normalization", "critic_obs_normalization"):
+        if field_name not in supported_fields:
+            kwargs.pop(field_name, None)
+    return RslRlPpoActorCriticCfg(**kwargs)
+
+
 @configclass
 class G1FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
@@ -9,7 +22,7 @@ class G1FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     save_interval = 500
     experiment_name = "g1_tracking"
     empirical_normalization = True
-    policy = RslRlPpoActorCriticCfg(
+    policy = _actor_critic_cfg(
         init_noise_std=1.0,
         actor_obs_normalization=True,
         critic_obs_normalization=True,

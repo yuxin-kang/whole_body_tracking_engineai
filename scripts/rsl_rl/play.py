@@ -110,6 +110,7 @@ from whole_body_tracking.utils.exporter import (
     export_motion_policy_as_onnx,
     resolve_rsl_rl_normalizer,
 )
+from whole_body_tracking.utils.rsl_rl_checkpoint import load_rsl_rl_checkpoint_for_inference
 
 
 def _print_termination_debug(base_env, dones: torch.Tensor):
@@ -211,7 +212,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # load previously trained model
     ppo_runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    ppo_runner.load(resume_path)
+    load_rsl_rl_checkpoint_for_inference(ppo_runner, resume_path)
 
     # obtain the trained policy for inference
     policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
