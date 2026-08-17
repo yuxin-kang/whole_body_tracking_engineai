@@ -6,6 +6,8 @@ import argparse
 import importlib.util
 import sys
 
+import numpy as np
+
 from isaaclab.app import AppLauncher
 
 # local imports
@@ -31,15 +33,59 @@ def _disable_robot_terminations(env_cfg):
             setattr(env_cfg.terminations, name, None)
 
 
+def _configure_t800_motion_episode(env_cfg, motion_file: str, play_from_start: bool) -> None:
+    with np.load(motion_file, allow_pickle=False) as motion:
+        if "joint_pos" not in motion or "fps" not in motion:
+            raise ValueError(f"Motion file must contain joint_pos and fps: {motion_file}")
+        num_frames = int(motion["joint_pos"].shape[0])
+        fps = float(np.asarray(motion["fps"]).reshape(-1)[0])
+
+    if num_frames <= 0 or fps <= 0.0:
+        raise ValueError(f"Invalid motion length/fps in {motion_file}: frames={num_frames}, fps={fps}")
+
+    motion_cfg = env_cfg.commands.motion
+    motion_cfg.min_traj_duration = None
+    motion_cfg.bridge_frames = 0
+    motion_cfg.pd_stand_reset_ratio = 0.0
+    if play_from_start:
+        motion_cfg.play_from_start = True
+        motion_cfg.resample_at_motion_end = False
+    env_cfg.episode_length_s = num_frames / fps
+    phase_mode = "start" if motion_cfg.play_from_start else motion_cfg.sampling_mode
+    end_mode = "resample" if motion_cfg.resample_at_motion_end else "hold"
+    print(
+        f"[INFO] T800 native motion playback: {num_frames} frames / {fps:g} Hz "
+        f"= {env_cfg.episode_length_s:.4f}s; phase={phase_mode}, motion_end={end_mode}"
+    )
+
+
 def _extract_obs(observations):
     if isinstance(observations, tuple):
         return observations[0]
     return observations
 
+
+def _configure_play_viewer(env_cfg, follow_camera: bool) -> None:
+    """Use a nearby static camera so interactive mouse controls remain effective."""
+    if follow_camera:
+        return
+    env_cfg.viewer.origin_type = "world"
+    env_cfg.viewer.asset_name = None
+    env_cfg.viewer.body_name = None
+    env_cfg.viewer.eye = (-1.8, -1.8, 1.6)
+    env_cfg.viewer.lookat = (0.0, 0.0, 0.8)
+    print("[INFO] Free viewer camera enabled; use --follow_camera true to track the robot.")
+
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
+parser.add_argument(
+    "--max_steps",
+    type=int,
+    default=None,
+    help="Stop after this many policy steps even when video recording is disabled.",
+)
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
@@ -59,10 +105,22 @@ parser.add_argument(
     help="Print triggered termination terms and error values when an environment ends.",
 )
 parser.add_argument(
+    "--debug_tracking",
+    type=_str2bool,
+    default=False,
+    help="Print finite-rollout tracking and per-joint error statistics.",
+)
+parser.add_argument(
     "--play_from_start",
     type=_str2bool,
     default=False,
     help="In play mode, always start each motion rollout from frame 0 instead of sampling a random segment.",
+)
+parser.add_argument(
+    "--follow_camera",
+    type=_str2bool,
+    default=False,
+    help="Continuously lock the viewer to the robot. By default the nearby camera remains freely movable.",
 )
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -129,6 +187,45 @@ def _enable_play_from_start(base_env):
     motion_command.set_play_from_start_mode()
 
 
+def _capture_tracking_sample(motion_command):
+    metrics = {
+        name: value.detach().cpu()
+        for name, value in motion_command.metrics.items()
+        if name.startswith("error_")
+    }
+    return metrics, motion_command.joint_pos.detach().cpu(), motion_command.robot_joint_pos.detach().cpu()
+
+
+def _print_tracking_summary(motion_command, metric_samples, target_joint_samples, actual_joint_samples, done_count):
+    print(f"[TRACKING] steps={len(target_joint_samples)} done_count={done_count}")
+    for name in sorted(metric_samples):
+        values = torch.cat(metric_samples[name])
+        print(
+            f"[TRACKING] {name}: mean={values.mean().item():.4f} "
+            f"p95={torch.quantile(values, 0.95).item():.4f} max={values.max().item():.4f}"
+        )
+
+    targets = torch.cat(target_joint_samples, dim=0)
+    actuals = torch.cat(actual_joint_samples, dim=0)
+    joint_rmse = torch.sqrt(torch.mean(torch.square(targets - actuals), dim=0))
+    target_range = targets.max(dim=0).values - targets.min(dim=0).values
+    actual_range = actuals.max(dim=0).values - actuals.min(dim=0).values
+
+    if motion_command.robot_joint_indexes is None:
+        joint_names = motion_command.robot.joint_names
+    else:
+        joint_names = [
+            motion_command.robot.joint_names[index]
+            for index in motion_command.robot_joint_indexes.detach().cpu().tolist()
+        ]
+
+    for index in torch.argsort(joint_rmse, descending=True).tolist():
+        print(
+            f"[TRACKING_JOINT] {joint_names[index]}: rmse={joint_rmse[index].item():.4f} "
+            f"target_range={target_range[index].item():.4f} actual_range={actual_range[index].item():.4f}"
+        )
+
+
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlOnPolicyRunnerCfg):
     """Play with RSL-RL agent."""
@@ -181,8 +278,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print(f"[INFO]: Using motion file from CLI: {args_cli.motion_file}")
             env_cfg.commands.motion.motion_file = os.path.abspath(args_cli.motion_file)
 
+    if args_cli.task and "t800" in args_cli.task.lower():
+        _configure_t800_motion_episode(
+            env_cfg,
+            env_cfg.commands.motion.motion_file,
+            play_from_start=args_cli.play_from_start,
+        )
+
     if args_cli.no_terminations:
         _disable_robot_terminations(env_cfg)
+
+    _configure_play_viewer(env_cfg, follow_camera=args_cli.follow_camera)
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -265,21 +371,42 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # reset environment
     obs = _extract_obs(env.get_observations())
     timestep = 0
+    metric_samples = {}
+    target_joint_samples = []
+    actual_joint_samples = []
+    done_count = 0
+    motion_command = env.unwrapped.command_manager.get_term("motion") if args_cli.debug_tracking else None
     # simulate environment
     while simulation_app.is_running():
         # run everything in inference mode
         with torch.inference_mode():
+            if motion_command is not None:
+                metrics, target_joints, actual_joints = _capture_tracking_sample(motion_command)
+                for name, values in metrics.items():
+                    metric_samples.setdefault(name, []).append(values)
+                target_joint_samples.append(target_joints)
+                actual_joint_samples.append(actual_joints)
             # agent stepping
             actions = policy(obs)
             # env stepping
             obs, _, dones, _ = env.step(actions)
+            done_count += int(dones.sum().item())
             if args_cli.debug_terminations:
                 _print_termination_debug(env.unwrapped, dones)
-        if args_cli.video:
-            timestep += 1
-            # Exit the play loop after recording one video
-            if timestep == args_cli.video_length:
-                break
+        timestep += 1
+        if args_cli.video and timestep >= args_cli.video_length:
+            break
+        if args_cli.max_steps is not None and timestep >= args_cli.max_steps:
+            break
+
+    if motion_command is not None and target_joint_samples:
+        _print_tracking_summary(
+            motion_command,
+            metric_samples,
+            target_joint_samples,
+            actual_joint_samples,
+            done_count,
+        )
 
     # close the simulator
     env.close()

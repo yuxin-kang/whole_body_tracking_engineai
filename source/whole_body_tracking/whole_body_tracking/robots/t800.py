@@ -1,10 +1,19 @@
 import os
+import tempfile
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 
 from whole_body_tracking.assets import ASSET_DIR
+
+
+def _implicit_actuator_cfg(**kwargs) -> ImplicitActuatorCfg:
+    """Build an actuator config across Isaac Lab friction API versions."""
+    for field_name in ("dynamic_friction", "viscous_friction"):
+        if not hasattr(ImplicitActuatorCfg, field_name):
+            kwargs.pop(field_name, None)
+    return ImplicitActuatorCfg(**kwargs)
 
 # T800 motor/inertia parameters aligned with the original T800 setup.
 ARMATURE_Q300H_L = 0.2427264
@@ -54,6 +63,7 @@ DAMPING_Q50H = 0.3
 DAMPING_Q25H = 0.3
 
 T800_URDF_PATH = os.path.join(ASSET_DIR, "t800", "urdf", "serial_t800.urdf")
+T800_USD_DIR = os.path.join(tempfile.gettempdir(), "IsaacLab", "t800")
 
 T800_CFG = ArticulationCfg(
     spawn=sim_utils.UrdfFileCfg(
@@ -61,6 +71,7 @@ T800_CFG = ArticulationCfg(
         replace_cylinders_with_capsules=False,
         merge_fixed_joints=False,
         asset_path=T800_URDF_PATH,
+        usd_dir=T800_USD_DIR,
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
@@ -113,7 +124,7 @@ T800_CFG = ArticulationCfg(
     ),
     soft_joint_pos_limit_factor=0.9,
     actuators={
-        "legs": ImplicitActuatorCfg(
+        "legs": _implicit_actuator_cfg(
             joint_names_expr=[
                 ".*_HIP_PITCH.*",
                 ".*_HIP_ROLL.*",
@@ -169,7 +180,7 @@ T800_CFG = ArticulationCfg(
                 ".*_KNEE_PITCH.*": 0.01,
             },
         ),
-        "feet": ImplicitActuatorCfg(
+        "feet": _implicit_actuator_cfg(
             joint_names_expr=[".*_ANKLE_PITCH.*", ".*_ANKLE_ROLL.*"],
             effort_limit_sim={
                 ".*_ANKLE_PITCH.*": EFFORT_LIMIT_Q50H,
@@ -204,7 +215,7 @@ T800_CFG = ArticulationCfg(
                 ".*_ANKLE_ROLL.*": 0.012,
             },
         ),
-        "torso_yaw": ImplicitActuatorCfg(
+        "torso_yaw": _implicit_actuator_cfg(
             joint_names_expr=["J12_TORSO_YAW"],
             effort_limit_sim=EFFORT_LIMIT_Q200H,
             velocity_limit_sim=VELOCITY_LIMIT_Q200H,
@@ -215,7 +226,7 @@ T800_CFG = ArticulationCfg(
             dynamic_friction=0.06,
             viscous_friction=0.008,
         ),
-        "arms": ImplicitActuatorCfg(
+        "arms": _implicit_actuator_cfg(
             joint_names_expr=[
                 ".*_SHOULDER_PITCH.*",
                 ".*_SHOULDER_ROLL.*",
@@ -280,7 +291,7 @@ T800_CFG = ArticulationCfg(
                 ".*_ELBOW_YAW.*": 0.006,
             },
         ),
-        "head": ImplicitActuatorCfg(
+        "head": _implicit_actuator_cfg(
             joint_names_expr=["J27_HEAD_PITCH", "J28_HEAD_YAW"],
             effort_limit_sim={
                 "J27_HEAD_PITCH": EFFORT_LIMIT_Q25H,

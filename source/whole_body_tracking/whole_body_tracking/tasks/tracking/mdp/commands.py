@@ -16,7 +16,6 @@ from isaaclab.markers.config import FRAME_MARKER_CFG
 from isaaclab.utils import configclass
 from isaaclab.utils.math import (
     quat_apply,
-    quat_apply_inverse,
     quat_error_magnitude,
     quat_from_euler_xyz,
     quat_inv,
@@ -24,6 +23,11 @@ from isaaclab.utils.math import (
     sample_uniform,
     yaw_quat,
 )
+
+try:
+    from isaaclab.utils.math import quat_apply_inverse
+except ImportError:  # Isaac Lab 2.1 uses the older equivalent name.
+    from isaaclab.utils.math import quat_rotate_inverse as quat_apply_inverse
 
 from whole_body_tracking.tasks.tracking.debug_utils import collect_ee_body_violations
 from whole_body_tracking.tasks.tracking.mdp.lke import (
@@ -247,6 +251,10 @@ class MotionCommand(CommandTerm):
         self.motion_body_indexes = torch.tensor(
             [motion_body_names.index(name) for name in self.cfg.body_names], dtype=torch.long, device=self.device
         )
+        unknown_feet = [name for name in self.cfg.feet_body_names if name not in self.cfg.body_names]
+        if unknown_feet:
+            raise ValueError(f"feet_body_names must be included in body_names, got {unknown_feet}")
+        self.feet_indexes = [self.cfg.body_names.index(name) for name in self.cfg.feet_body_names]
 
         if self.cfg.motion_joint_names is not None:
             self.robot_joint_indexes = torch.tensor(
@@ -885,8 +893,6 @@ class MotionStandingCommand(MotionCommand):
         self.root_indexes = [self.cfg.body_names.index(name) for name in self.cfg.root_body_names]
         self.root_index = self.root_indexes[0] if self.root_indexes else self.motion_root_body_index
         self.shoulders_indexes = [self.cfg.body_names.index(name) for name in self.cfg.shoulders_body_names]
-        self.feet_indexes = [self.cfg.body_names.index(name) for name in self.cfg.feet_body_names]
-
     def _sample_standing_init(self, count: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.standing_init_pool_ids.numel() > 0:
             pool_indexes = torch.randint(0, self.standing_init_pool_ids.numel(), (count,))
@@ -1000,6 +1006,7 @@ class MotionCommandCfg(CommandTermCfg):
     body_names: list[str] = MISSING
     motion_body_names: list[str] | None = None
     motion_joint_names: list[str] | None = None
+    feet_body_names: list[str] = []
 
     pose_range: dict[str, tuple[float, float]] = {}
     velocity_range: dict[str, tuple[float, float]] = {}
@@ -1035,6 +1042,5 @@ class MotionStandingCommandCfg(MotionCommandCfg):
     init_pos_file: str = MISSING
     root_body_names: list[str] = []
     shoulders_body_names: list[str] = []
-    feet_body_names: list[str] = []
     tracking_standing_weight: tuple[float, float] = (1.0, 1.0)
     standing_init_sample_pool_size: int = 2048

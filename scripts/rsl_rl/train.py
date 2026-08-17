@@ -11,6 +11,8 @@ import argparse
 import pickle
 import sys
 
+import numpy as np
+
 from isaaclab.app import AppLauncher
 
 # local imports
@@ -36,10 +38,59 @@ def _disable_robot_terminations(env_cfg):
             setattr(env_cfg.terminations, name, None)
 
 
-def _learn_with_code_state_fallback(runner, num_learning_iterations: int):
+def _configure_t800_motion_episode(env_cfg, motion_file: str) -> None:
+    """Keep T800 motions native-length without overriding task reset semantics."""
+    with np.load(motion_file, allow_pickle=False) as motion:
+        if "joint_pos" not in motion or "fps" not in motion:
+            raise ValueError(f"Motion file must contain joint_pos and fps: {motion_file}")
+        num_frames = int(motion["joint_pos"].shape[0])
+        fps = float(np.asarray(motion["fps"]).reshape(-1)[0])
+
+    if num_frames <= 0 or fps <= 0.0:
+        raise ValueError(f"Invalid motion length/fps in {motion_file}: frames={num_frames}, fps={fps}")
+
+    motion_cfg = env_cfg.commands.motion
+    motion_cfg.min_traj_duration = None
+    motion_cfg.bridge_frames = 0
+    motion_cfg.pd_stand_reset_ratio = 0.0
+    env_cfg.episode_length_s = num_frames / fps
+    phase_mode = "start" if motion_cfg.play_from_start else motion_cfg.sampling_mode
+    end_mode = "resample" if motion_cfg.resample_at_motion_end else "hold"
+    print(
+        f"[INFO] T800 native motion episode: {num_frames} frames / {fps:g} Hz "
+        f"= {env_cfg.episode_length_s:.4f}s; no bridge, phase={phase_mode}, motion_end={end_mode}"
+    )
+
+
+def _configure_t800_punch_normal_episode(env_cfg) -> None:
+    """Restore the training distribution used by the successful Punch_normal run."""
+    motion_cfg = env_cfg.commands.motion
+    env_cfg.episode_length_s = 10.0
+    motion_cfg.min_traj_duration = 10.0
+    motion_cfg.bridge_frames = 20
+    motion_cfg.sampling_mode = "adaptive"
+    motion_cfg.phase_sampling_windows = []
+    motion_cfg.pd_stand_reset_ratio = 0.2
+    motion_cfg.reset_preroll_frames = 0
+    motion_cfg.play_from_start = False
+    motion_cfg.resample_at_motion_end = True
+    env_cfg.events.push_robot.interval_range_s = (1.0, 3.0)
+    print(
+        "[INFO] T800 Punch_normal episode: 10.0000s; min_traj_duration=10.0000s, "
+        "bridge=20, phase=adaptive, motion_end=resample, pd_stand_reset_ratio=0.2, "
+        "push_interval=(1.0, 3.0)s"
+    )
+
+
+def _learn_with_code_state_fallback(
+    runner, num_learning_iterations: int, init_at_random_ep_len: bool = True
+):
     """Retry training without git snapshot logging if diff encoding fails."""
     try:
-        runner.learn(num_learning_iterations=num_learning_iterations, init_at_random_ep_len=True)
+        runner.learn(
+            num_learning_iterations=num_learning_iterations,
+            init_at_random_ep_len=init_at_random_ep_len,
+        )
     except UnicodeEncodeError as err:
         git_status_repos = getattr(runner, "git_status_repos", None)
         if git_status_repos and "surrogates not allowed" in str(err):
@@ -48,7 +99,10 @@ def _learn_with_code_state_fallback(runner, num_learning_iterations: int):
                 "Retrying with code state logging disabled."
             )
             runner.git_status_repos = []
-            runner.learn(num_learning_iterations=num_learning_iterations, init_at_random_ep_len=True)
+            runner.learn(
+                num_learning_iterations=num_learning_iterations,
+                init_at_random_ep_len=init_at_random_ep_len,
+            )
             return
         raise
 
@@ -72,6 +126,12 @@ parser.add_argument("--seed", type=int, default=None, help="Seed used for the en
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument("--registry_name", type=str, default=None, help="The name of the wandb registry.")
 parser.add_argument("--motion_file", type=str, default=None, help="Path to a local motion .npz file.")
+parser.add_argument(
+    "--t800_episode_mode",
+    choices=("native", "punch_normal"),
+    default="native",
+    help="T800 trajectory organization: native single clip or the successful Punch_normal 10 s bridged setup.",
+)
 parser.add_argument(
     "--no_terminations",
     type=_str2bool,
@@ -155,8 +215,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         api = wandb.Api()
         artifact = api.artifact(registry_name)
         env_cfg.commands.motion.motion_file = str(pathlib.Path(artifact.download()) / "motion.npz")
+    elif isinstance(env_cfg.commands.motion.motion_file, (str, os.PathLike)) and os.fspath(
+        env_cfg.commands.motion.motion_file
+    ):
+        print(f"[INFO] Using motion file configured by task: {env_cfg.commands.motion.motion_file}")
     else:
-        raise ValueError("Either --motion_file or --registry_name must be provided.")
+        raise ValueError("Provide --motion_file or --registry_name, or select a task with a configured motion file.")
+
+    is_t800_task = bool(args_cli.task and "t800" in args_cli.task.lower())
+    if is_t800_task:
+        if args_cli.t800_episode_mode == "punch_normal":
+            _configure_t800_punch_normal_episode(env_cfg)
+        else:
+            _configure_t800_motion_episode(env_cfg, env_cfg.commands.motion.motion_file)
 
     if args_cli.no_terminations:
         _disable_robot_terminations(env_cfg)
@@ -213,7 +284,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     dump_pickle(os.path.join(log_dir, "params", "agent.pkl"), agent_cfg)
 
     # run training
-    _learn_with_code_state_fallback(runner, agent_cfg.max_iterations)
+    # Motion-phase sampling already de-synchronizes T800 rollouts. Avoid also
+    # shortening the first native-length episode through runner bookkeeping.
+    is_native_t800_episode = is_t800_task and args_cli.t800_episode_mode == "native"
+    _learn_with_code_state_fallback(
+        runner,
+        agent_cfg.max_iterations,
+        init_at_random_ep_len=not is_native_t800_episode,
+    )
 
     # close the simulator
     env.close()

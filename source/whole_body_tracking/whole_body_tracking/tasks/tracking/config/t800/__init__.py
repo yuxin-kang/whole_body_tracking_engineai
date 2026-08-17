@@ -13,6 +13,136 @@ gym.register(
 )
 
 gym.register(
+    id="Tracking-Flat-T800-Baseline-StraightPunchL-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800FlatBaselineStraightPunchLEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-Baseline-StraightPunchR-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800FlatBaselineStraightPunchREnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-Baseline-LeftHook-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800FlatBaselineLeftHookEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-Baseline-RearHook-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800FlatBaselineRearHookEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-Baseline-LeftFrontKick-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800FlatBaselineLeftFrontKickEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-Baseline-RoundhouseKick-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800FlatBaselineRoundhouseKickEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-Baseline-LeftFrontKick-CompleteEpisode-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800FlatBaselineLeftFrontKickCompleteEpisodeEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-Baseline-LeftFrontKick-CompleteEpisode-HeightFallOnly-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800FlatBaselineLeftFrontKickCompleteEpisodeHeightFallOnlyEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-Baseline-RoundhouseKick-CompleteEpisode-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800FlatBaselineRoundhouseKickCompleteEpisodeEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-Improved-StraightPunchL-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800FlatImprovedStraightPunchLEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-Improved-StraightPunchR-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800FlatImprovedStraightPunchREnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-Improved-LeftHook-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800FlatImprovedLeftHookEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tracking-Flat-T800-Improved-RoundhouseKick-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.T800FlatImprovedRoundhouseKickEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:T800FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
     id="Tracking-Flat-T800-Wo-State-Estimation-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,

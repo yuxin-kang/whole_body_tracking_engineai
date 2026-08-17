@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.assets import Articulation
 from isaaclab.sensors import ContactSensor
-from isaaclab.utils.math import quat_error_magnitude
+from isaaclab.utils.math import quat_apply, quat_error_magnitude
 
 from whole_body_tracking.tasks.tracking.mdp.commands import MotionCommand
 
@@ -55,6 +55,38 @@ def motion_relative_body_position_error_exp(
         torch.square(command.body_pos_relative_w[:, body_indexes] - command.robot_body_pos_w[:, body_indexes]), dim=-1
     )
     return torch.exp(-error.mean(-1) / std**2)
+
+
+def motion_fixed_offset_body_position_error_exp(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    std: float,
+    reference_body_name: str,
+    target_offset_b: tuple[float, float, float],
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Track a physical endpoint whose target is a fixed offset from a motion body.
+
+    The T800 motion schema ends at the elbow-yaw bodies, while the URDF has a
+    fixed wrist endpoint beyond each elbow.  Applying the URDF offset in the
+    reference elbow frame makes the reward measure the real fist position.
+    """
+
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    reference_index = command.cfg.body_names.index(reference_body_name)
+    target_offset = torch.tensor(
+        target_offset_b,
+        dtype=command.body_pos_relative_w.dtype,
+        device=command.device,
+    ).expand(command.num_envs, -1)
+    target_position = command.body_pos_relative_w[:, reference_index] + quat_apply(
+        command.body_quat_relative_w[:, reference_index], target_offset
+    )
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    robot_position = asset.data.body_pos_w[:, asset_cfg.body_ids[0]]
+    error = torch.sum(torch.square(target_position - robot_position), dim=-1)
+    return torch.exp(-error / std**2)
 
 
 def motion_relative_body_orientation_error_exp(
@@ -303,6 +335,28 @@ def phase_motion_relative_body_position_error_exp(
         command_name=command_name,
         std=std,
         body_names=body_names,
+    )
+    return reward * _get_phase_window_mask(command, phase_start=phase_start, phase_end=phase_end)
+
+
+def phase_motion_fixed_offset_body_position_error_exp(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    std: float,
+    phase_start: float,
+    phase_end: float,
+    reference_body_name: str,
+    target_offset_b: tuple[float, float, float],
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    reward = motion_fixed_offset_body_position_error_exp(
+        env=env,
+        command_name=command_name,
+        std=std,
+        reference_body_name=reference_body_name,
+        target_offset_b=target_offset_b,
+        asset_cfg=asset_cfg,
     )
     return reward * _get_phase_window_mask(command, phase_start=phase_start, phase_end=phase_end)
 

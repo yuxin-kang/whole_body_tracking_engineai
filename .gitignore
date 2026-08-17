@@ -18,6 +18,7 @@
 !.vscode
 
 # Outputs
+.cache/
 **/runs/*
 **/logs/*
 !docs/logs/
@@ -44,10 +45,21 @@ _build
 !data/g1/
 !data/g1/1307.npz
 !data/g1/robot_init_states_8192.pth
+!data/npz/
+!data/npz/traj_eng_50hz_canonical/
+!data/npz/traj_eng_50hz_canonical/*.npz
+!data/npz/traj_eng_50hz_improved/
+!data/npz/traj_eng_50hz_improved/*.npz
+!data/npz/traj_eng_50hz_episode_complete/
+!data/npz/traj_eng_50hz_episode_complete/left_front_kick_002_terminal_hold_1s.npz
+!data/npz/traj_eng_50hz_episode_complete/roundhouse_kick_001_terminal_hold_1s.npz
 !tests/test_540_kick_phase_landmarks.py
 !tests/test_540_phase_curriculum_momentum_variants.py
 !tests/test_540_start0_single_episode.py
 !tests/test_540_no_early_terminations.py
+!tests/test_t800_short_episode_baselines.py
+!tests/test_t800_improved_actions.py
+!tests/test_play_free_camera.py
 !tests/test_g1_kungfu_1307_config.py
 .omx/
 **/exp/*

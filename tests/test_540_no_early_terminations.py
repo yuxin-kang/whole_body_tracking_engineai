@@ -22,3 +22,14 @@ def test_540_no_early_terminations_cfg_disables_error_terminations_only():
     assert "env_cfg.terminations.ee_body_pos = None" in helper
     assert "time_out" not in helper
     assert "_disable_early_terminations(self)" in block
+
+
+def test_t800_base_uses_simple_height_based_tracking_early_reset():
+    config = Path("source/whole_body_tracking/whole_body_tracking/tasks/tracking/config/t800/flat_env_cfg.py").read_text()
+    block = config.split("class T800FlatEnvCfg(TrackingEnvCfg):", 1)[1].split("@configclass", 1)[0]
+
+    assert "self.terminations.anchor_pos.func = mdp.bad_anchor_pos_z_only" in block
+    assert 'self.terminations.anchor_pos.params["threshold"] = 0.25' in block
+    assert 'self.terminations.anchor_ori.params["threshold"] = 0.8' in block
+    assert "self.terminations.ee_body_pos.func = mdp.bad_motion_body_pos_z_only" in block
+    assert 'self.terminations.ee_body_pos.params["threshold"] = 0.25' in block

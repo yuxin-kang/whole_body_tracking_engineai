@@ -1,0 +1,306 @@
+#!/usr/bin/env bash
+# Sync only the newest checkpoint from one or more local RSL-RL runs.
+#
+# The checkpoint keeps the same project-relative path on the client. Motion
+# data, W&B files, parameters, exports, and older checkpoints are never copied.
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  scripts/sync_latest_ckpt_to_client [--dry-run] RUN [RUN ...]
+
+RUN may be either:
+  - a project-relative run directory;
+  - an absolute run directory inside this project; or
+  - an exact run-directory basename under logs/rsl_rl.
+
+Default client connection:
+  user:         kyx
+  host:         10.12.120.125
+  port:         22
+  project root: /home/kyx/robot/mimic/whole_body_tracking_engineai
+
+Environment overrides:
+  CLIENT_SSH_USER
+  CLIENT_SSH_HOST
+  CLIENT_SSH_PORT
+  CLIENT_PROJECT_ROOT
+  CLIENT_SSH_PASSWORD   Use sshpass when set, including a whitespace password.
+
+Examples:
+  scripts/sync_latest_ckpt_to_client \
+    logs/rsl_rl/t800_flat/2026-08-10_23-47-41_left_front_kick_002_canonical_a4000_j7301_0
+
+  CLIENT_SSH_PASSWORD=' ' scripts/sync_latest_ckpt_to_client RUN_A RUN_B
+EOF
+}
+
+dry_run=0
+if [[ "${1:-}" == "--dry-run" ]]; then
+  dry_run=1
+  shift
+fi
+if (( $# == 0 )); then
+  usage >&2
+  exit 2
+fi
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+server_project_root="$(cd -- "$script_dir/.." && pwd)"
+server_log_root="$server_project_root/logs/rsl_rl"
+
+client_user="${CLIENT_SSH_USER:-kyx}"
+client_host="${CLIENT_SSH_HOST:-10.12.120.125}"
+client_port="${CLIENT_SSH_PORT:-22}"
+client_project_root="${CLIENT_PROJECT_ROOT:-/home/kyx/robot/mimic/whole_body_tracking_engineai}"
+remote_target="$client_user@$client_host"
+
+if [[ ! "$client_port" =~ ^[0-9]+$ ]]; then
+  echo "Invalid CLIENT_SSH_PORT: $client_port" >&2
+  exit 2
+fi
+for connection_value in "$client_user" "$client_host" "$client_project_root"; do
+  if [[ ! "$connection_value" =~ ^[A-Za-z0-9_./:@-]+$ ]]; then
+    echo "Unsafe client connection value: $connection_value" >&2
+    exit 2
+  fi
+done
+
+# SSH/rsync must not use the HTTP proxy configured for downloads and W&B.
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+
+ssh_options=(
+  -p "$client_port"
+  -o StrictHostKeyChecking=accept-new
+  -o ConnectTimeout=10
+)
+if [[ -v CLIENT_SSH_PASSWORD ]]; then
+  command -v sshpass >/dev/null || {
+    echo "CLIENT_SSH_PASSWORD is set, but sshpass is unavailable." >&2
+    exit 3
+  }
+  export SSHPASS="$CLIENT_SSH_PASSWORD"
+  ssh_command=(sshpass -e ssh "${ssh_options[@]}")
+  rsync_shell="sshpass -e ssh -p $client_port -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
+else
+  ssh_command=(ssh "${ssh_options[@]}")
+  rsync_shell="ssh -p $client_port -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
+fi
+
+resolve_run() {
+  local requested="$1"
+  local candidate=""
+  local matches=()
+
+  if [[ -d "$requested" ]]; then
+    candidate="$requested"
+  elif [[ -d "$server_project_root/$requested" ]]; then
+    candidate="$server_project_root/$requested"
+  else
+    while IFS= read -r -d '' candidate; do
+      if [[ "${candidate##*/}" == "$requested" ]]; then
+        matches+=("$candidate")
+      fi
+    done < <(find "$server_log_root" -mindepth 2 -maxdepth 2 -type d -print0)
+
+    if (( ${#matches[@]} == 0 )); then
+      echo "Run not found: $requested" >&2
+      return 4
+    fi
+    if (( ${#matches[@]} > 1 )); then
+      echo "Run basename is ambiguous: $requested" >&2
+      printf '  %s\n' "${matches[@]}" >&2
+      return 4
+    fi
+    candidate="${matches[0]}"
+  fi
+
+  candidate="$(realpath -e -- "$candidate")"
+  case "$candidate/" in
+    "$server_log_root"/*/) printf '%s\n' "$candidate" ;;
+    *)
+      echo "Run must be inside $server_log_root: $candidate" >&2
+      return 4
+      ;;
+  esac
+}
+
+latest_checkpoint() {
+  local run_dir="$1"
+  local candidate=""
+  local checkpoint=""
+  local filename=""
+  local version=-1
+  local candidate_version=-1
+
+  while IFS= read -r -d '' candidate; do
+    filename="${candidate##*/}"
+    if [[ "$filename" =~ ^model_([0-9]+)\.pt$ ]]; then
+      candidate_version="${BASH_REMATCH[1]}"
+    elif [[ "$filename" =~ ^ckpt_([0-9]+)\.pt$ ]]; then
+      candidate_version="${BASH_REMATCH[1]}"
+    else
+      continue
+    fi
+    if (( 10#$candidate_version > version )); then
+      version=$((10#$candidate_version))
+      checkpoint="$candidate"
+    fi
+  done < <(
+    find "$run_dir" -maxdepth 2 -type f \
+      \( -name 'model_*.pt' -o -name 'ckpt_*.pt' \) -print0
+  )
+
+  if [[ -z "$checkpoint" ]]; then
+    echo "No numbered checkpoint found under: $run_dir" >&2
+    return 5
+  fi
+  printf '%s\n' "$checkpoint"
+}
+
+motion_for_run() {
+  local run_name="$1"
+  local action=""
+  case "$run_name" in
+    *straight_punch_L*improved*)
+      printf '%s\n' "data/npz/traj_eng_50hz_improved/straight_punch_L_terminal_hold_0p5s.npz"
+      return 0
+      ;;
+    *straight_punch_R*improved*)
+      printf '%s\n' "data/npz/traj_eng_50hz_improved/straight_punch_R_terminal_hold_0p5s.npz"
+      return 0
+      ;;
+    *left_hook_001*improved*)
+      printf '%s\n' "data/npz/traj_eng_50hz_improved/left_hook_001_terminal_hold_0p5s.npz"
+      return 0
+      ;;
+    *roundhouse_kick_001*improved*)
+      printf '%s\n' "data/npz/traj_eng_50hz_improved/roundhouse_kick_001_retimed_terminal_hold_1s.npz"
+      return 0
+      ;;
+  esac
+  if [[ "$run_name" == *"complete_episode_hold1s"* || "$run_name" == *"complete_episode_heightfall"* ]]; then
+    for action in left_front_kick_002 roundhouse_kick_001; do
+      if [[ "$run_name" == *"$action"* ]]; then
+        printf 'data/npz/traj_eng_50hz_episode_complete/%s_terminal_hold_1s.npz\n' "$action"
+        return 0
+      fi
+    done
+  fi
+  for action in \
+    left_front_kick_002 \
+    roundhouse_kick_001 \
+    straight_punch_R \
+    straight_punch_L \
+    left_hook_001 \
+    rear_hook_001; do
+    if [[ "$run_name" == *"$action"* ]]; then
+      printf 'data/npz/traj_eng_50hz_canonical/%s.npz\n' "$action"
+      return 0
+    fi
+  done
+  return 1
+}
+
+task_for_run() {
+  local run_name="$1"
+  case "$run_name" in
+    *straight_punch_L*improved*)
+      printf '%s\n' "Tracking-Flat-T800-Improved-StraightPunchL-v0"
+      ;;
+    *straight_punch_R*improved*)
+      printf '%s\n' "Tracking-Flat-T800-Improved-StraightPunchR-v0"
+      ;;
+    *left_hook_001*improved*)
+      printf '%s\n' "Tracking-Flat-T800-Improved-LeftHook-v0"
+      ;;
+    *roundhouse_kick_001*improved*)
+      printf '%s\n' "Tracking-Flat-T800-Improved-RoundhouseKick-v0"
+      ;;
+    *left_front_kick_002*complete_episode_heightfall*)
+      printf '%s\n' "Tracking-Flat-T800-Baseline-LeftFrontKick-CompleteEpisode-HeightFallOnly-v0"
+      ;;
+    *left_front_kick_002*complete_episode_hold1s*)
+      printf '%s\n' "Tracking-Flat-T800-Baseline-LeftFrontKick-CompleteEpisode-v0"
+      ;;
+    *roundhouse_kick_001*complete_episode_hold1s*)
+      printf '%s\n' "Tracking-Flat-T800-Baseline-RoundhouseKick-CompleteEpisode-v0"
+      ;;
+    *)
+      printf '%s\n' "Tracking-Flat-T800-v0"
+      ;;
+  esac
+}
+
+run_dirs=()
+checkpoints=()
+for requested_run in "$@"; do
+  run_dir="$(resolve_run "$requested_run")"
+  checkpoint="$(latest_checkpoint "$run_dir")"
+  run_dirs+=("$run_dir")
+  checkpoints+=("$checkpoint")
+done
+
+if (( dry_run == 0 )); then
+  if ! "${ssh_command[@]}" "$remote_target" "test -d '$client_project_root'"; then
+    echo "Client project root does not exist: $remote_target:$client_project_root" >&2
+    exit 6
+  fi
+fi
+
+for index in "${!run_dirs[@]}"; do
+  run_dir="${run_dirs[$index]}"
+  checkpoint="${checkpoints[$index]}"
+  run_name="${run_dir##*/}"
+  checkpoint_name="${checkpoint##*/}"
+  relative_checkpoint="${checkpoint#"$server_project_root/"}"
+  remote_checkpoint="$client_project_root/$relative_checkpoint"
+  remote_directory="${remote_checkpoint%/*}"
+  motion=""
+  task="$(task_for_run "$run_name")"
+  if motion="$(motion_for_run "$run_name")"; then
+    :
+  else
+    motion="UNKNOWN_MOTION"
+  fi
+
+  echo "run=$run_name"
+  echo "checkpoint=$relative_checkpoint"
+  echo "client=$remote_target:$remote_checkpoint"
+
+  if (( dry_run == 1 )); then
+    echo "status=dry-run"
+  else
+    "${ssh_command[@]}" "$remote_target" "mkdir -p -- '$remote_directory'"
+    rsync -av --protect-args -e "$rsync_shell" \
+      "$checkpoint" "$remote_target:$remote_directory/"
+
+    local_sha="$(sha256sum -- "$checkpoint" | awk '{print $1}')"
+    remote_sha="$(
+      "${ssh_command[@]}" "$remote_target" \
+        "sha256sum -- '$remote_checkpoint' | cut -d ' ' -f 1"
+    )"
+    if [[ "$local_sha" != "$remote_sha" ]]; then
+      echo "Checkpoint hash mismatch: $relative_checkpoint" >&2
+      exit 7
+    fi
+    echo "sha256=$local_sha"
+    echo "status=synced"
+
+    if [[ "$motion" != "UNKNOWN_MOTION" ]]; then
+      if ! "${ssh_command[@]}" "$remote_target" \
+        "test -f '$client_project_root/$motion'"; then
+        echo "warning=client motion missing: $motion" >&2
+      fi
+    fi
+  fi
+
+  if [[ "$motion" == "UNKNOWN_MOTION" ]]; then
+    echo "play=unknown motion mapping for $run_name" >&2
+  else
+    echo "play=cd $client_project_root && python scripts/rsl_rl/play.py --task $task --motion_file $motion --load_run $run_name --checkpoint $checkpoint_name --num_envs 1 --play_from_start true"
+  fi
+  echo
+done
