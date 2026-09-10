@@ -4,7 +4,7 @@ import torch
 from typing import TYPE_CHECKING, Literal
 
 import isaaclab.utils.math as math_utils
-from isaaclab.assets import Articulation
+from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs.mdp.events import _randomize_prop_by_op
 from isaaclab.managers import SceneEntityCfg
 
@@ -91,3 +91,22 @@ def randomize_rigid_body_com(
 
     # Set the new coms
     asset.root_physx_view.set_coms(coms, env_ids)
+
+
+def reset_rigid_object_to_default(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg,
+):
+    """Reset a rigid target to its configured pose and zero velocity.
+
+    MotionCommand owns the robot reset and applies it after reset events.  A
+    target therefore needs a separate reset term so a dynamic padded target
+    does not keep the displacement and angular velocity from the previous
+    strike.
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    root_state = asset.data.default_root_state[env_ids].clone()
+    root_state[:, :3] += env.scene.env_origins[env_ids]
+    root_state[:, 7:] = 0.0
+    asset.write_root_state_to_sim(root_state, env_ids=env_ids)

@@ -212,3 +212,16 @@ def test_punches_and_hook_use_narrower_ground_randomization():
 
     roundhouse = _class_block(source, "T800FlatImprovedRoundhouseKickEnvCfg")
     assert "_apply_stable_ground_randomization(self)" not in roundhouse
+
+
+def test_target_front_kick_and_roundhouse_use_high_friction_randomization():
+    source = CONFIG_PATH.read_text()
+    helper = source.split("def _apply_target_high_friction_randomization", 1)[1].split("def _phase_from_frame", 1)[0]
+    assert 'material_params["static_friction_range"] = (1.0, 1.7)' in helper
+    assert 'material_params["dynamic_friction_range"] = (1.0, 1.7)' in helper
+
+    for class_name in (
+        "T800FlatTargetLeftFrontKickEnvCfg",
+        "T800FlatTargetRoundhouseKickEnvCfg",
+    ):
+        assert "_apply_target_high_friction_randomization(self)" in _class_block(source, class_name)

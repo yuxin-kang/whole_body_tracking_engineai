@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Sync only the newest checkpoint from one or more local RSL-RL runs.
+# Sync the newest checkpoint from one or more local RSL-RL runs.
 #
-# The checkpoint keeps the same project-relative path on the client. Motion
-# data, W&B files, parameters, exports, and older checkpoints are never copied.
+# The checkpoint keeps the same project-relative path on the client. Existing
+# motion data is assumed to be present already; generated T800 get-up motions
+# are copied as well because they are new inputs required by that task.
 
 set -euo pipefail
 
@@ -163,7 +164,71 @@ latest_checkpoint() {
 motion_for_run() {
   local run_name="$1"
   local action=""
+  if [[ "$run_name" =~ _V([1-4])_ppo_ ]]; then
+    if [[ "$run_name" == *sdk_prone* ]]; then
+      printf '%s\n' "data/npz/t800_sdk_get_up/T800_prone_to_stance_sdk_clip_grounded_50hz.npz"
+    else
+      printf '%s\n' "data/npz/t800_sdk_get_up/T800_supine_to_stance_sdk_clip_50hz.npz"
+    fi
+    return 0
+  fi
   case "$run_name" in
+    *ridicule2*)
+      printf '%s\n' "data/npz/ridicule_2/ridicule2_t800_50hz.npz"
+      return 0
+      ;;
+    *ridicule*)
+      printf '%s\n' "data/npz/ridicule/motion1_t800_50hz.npz"
+      return 0
+      ;;
+    *sdk_supine*)
+      printf '%s\n' "data/npz/t800_sdk_get_up/T800_supine_to_stance_sdk_clip_50hz.npz"
+      return 0
+      ;;
+    *sdk_prone*)
+      printf '%s\n' "data/npz/t800_sdk_get_up/T800_prone_to_stance_sdk_clip_grounded_50hz.npz"
+      return 0
+      ;;
+    *left_front_kick*mixedwall*)
+      printf '%s\n' "data/npz/traj_eng_50hz_episode_complete/left_front_kick_002_terminal_hold_1s.npz"
+      return 0
+      ;;
+    *roundhouse_kick*mixedwall*)
+      printf '%s\n' "data/npz/traj_eng_50hz_improved/roundhouse_kick_001_retimed_terminal_hold_1s.npz"
+      return 0
+      ;;
+    *getup_recovery*|*getup_forearm*|*getup_aggressive*)
+      printf '%s\n' "data/npz/t800_get_up/faint_prone_getup_03_t800.npz"
+      return 0
+      ;;
+    *roundhouse_kick_001*stable_recovery*)
+      printf '%s\n' "data/npz/traj_eng_50hz_improved/roundhouse_kick_001_retimed_terminal_hold_1s.npz"
+      return 0
+      ;;
+    *left_front_kick*target*)
+      printf '%s\n' "data/npz/traj_eng_50hz_episode_complete/left_front_kick_002_terminal_hold_1s.npz"
+      return 0
+      ;;
+    *getup1*)
+      printf '%s\n' "data/npz/t800_get_up/getup1_t800.npz"
+      return 0
+      ;;
+    *getup4*)
+      printf '%s\n' "data/npz/t800_get_up/getup4_t800.npz"
+      return 0
+      ;;
+    *prone_getup_02*)
+      printf '%s\n' "data/npz/t800_get_up/prone_getup_02_t800.npz"
+      return 0
+      ;;
+    *getup_smooth*|*smooth_getup*|*getup_anchor2*|*getup_anchor3*)
+      printf '%s\n' "data/npz/t800_get_up/faint_prone_getup_03_t800.npz"
+      return 0
+      ;;
+    *faint_prone_getup_03*)
+      printf '%s\n' "data/npz/t800_get_up/faint_prone_getup_03_t800.npz"
+      return 0
+      ;;
     *straight_punch_L*improved*)
       printf '%s\n' "data/npz/traj_eng_50hz_improved/straight_punch_L_terminal_hold_0p5s.npz"
       return 0
@@ -206,7 +271,72 @@ motion_for_run() {
 
 task_for_run() {
   local run_name="$1"
+  local variant=""
+  local method=""
+  if [[ "$run_name" =~ _V([1-4])_ppo_ ]]; then
+    variant="${BASH_REMATCH[1]}"
+    if [[ "$run_name" == *sdk_prone* ]]; then
+      printf '%s\n' "Tracking-Flat-T800-GetUp-SDK-Prone-V${variant}-PPO-v0"
+    else
+      printf '%s\n' "Tracking-Flat-T800-GetUp-SDK-Supine-V${variant}-PPO-v0"
+    fi
+    return 0
+  fi
   case "$run_name" in
+    *ridicule*)
+      printf '%s\n' "Tracking-Flat-T800-v0"
+      ;;
+    *sdk_prone*|*sdk_supine*)
+      printf '%s\n' "Tracking-Flat-T800-GetUp-v0"
+      ;;
+    *left_front_kick*mixedwall*)
+      printf '%s\n' "Tracking-Flat-T800-Target-MixedWall-LeftFrontKick-v0"
+      ;;
+    *roundhouse_kick*mixedwall*)
+      printf '%s\n' "Tracking-Flat-T800-Target-MixedWall-RoundhouseKick-v0"
+      ;;
+    *getup_forearm_f1*)
+      printf '%s\n' "Tracking-Flat-T800-GetUp-Aggressive-C-Forearm-F1-v0"
+      ;;
+    *getup_forearm_f2*)
+      printf '%s\n' "Tracking-Flat-T800-GetUp-Aggressive-C-Forearm-F2-v0"
+      ;;
+    *getup_forearm_f3*)
+      printf '%s\n' "Tracking-Flat-T800-GetUp-Aggressive-C-Forearm-F3-v0"
+      ;;
+    *getup_forearm_f4*)
+      printf '%s\n' "Tracking-Flat-T800-GetUp-Aggressive-C-Forearm-F4-v0"
+      ;;
+    *getup_recovery*velgate*)
+      printf '%s\n' "Tracking-Flat-T800-GetUp-Recovery-OriVelGate-v0"
+      ;;
+    *getup_recovery*)
+      printf '%s\n' "Tracking-Flat-T800-GetUp-Recovery-Ori-v0"
+      ;;
+    *getup_aggressive_a*)
+      printf '%s\n' "Tracking-Flat-T800-GetUp-Aggressive-A-v0"
+      ;;
+    *getup_aggressive_b*)
+      printf '%s\n' "Tracking-Flat-T800-GetUp-Aggressive-B-v0"
+      ;;
+    *getup_aggressive_c*)
+      printf '%s\n' "Tracking-Flat-T800-GetUp-Aggressive-C-v0"
+      ;;
+    *getup_aggressive_d*)
+      printf '%s\n' "Tracking-Flat-T800-GetUp-Aggressive-D-v0"
+      ;;
+    *roundhouse_kick_001*stable_recovery*)
+      printf '%s\n' "Tracking-Flat-T800-Improved-RoundhouseKick-StableRecovery-v0"
+      ;;
+    *left_front_kick*target*)
+      printf '%s\n' "Tracking-Flat-T800-Target-LeftFrontKick-v0"
+      ;;
+    *getup_smooth*|*smooth_getup*|*getup_anchor2*|*getup_anchor3*)
+      printf '%s\n' "Tracking-Flat-T800-GetUp-Smooth-v0"
+      ;;
+    *getup1*|*getup4*|*prone_getup_02*|*faint_prone_getup_03*)
+      printf '%s\n' "Tracking-Flat-T800-GetUp-v0"
+      ;;
     *straight_punch_L*improved*)
       printf '%s\n' "Tracking-Flat-T800-Improved-StraightPunchL-v0"
       ;;
@@ -232,6 +362,11 @@ task_for_run() {
       printf '%s\n' "Tracking-Flat-T800-v0"
       ;;
   esac
+}
+
+motion_requires_sync() {
+  [[ "$1" == data/npz/t800_get_up/* || "$1" == data/npz/t800_sdk_get_up/* ||
+     "$1" == data/npz/ridicule/* || "$1" == data/npz/ridicule_2/* ]]
 }
 
 run_dirs=()
@@ -290,8 +425,29 @@ for index in "${!run_dirs[@]}"; do
     echo "status=synced"
 
     if [[ "$motion" != "UNKNOWN_MOTION" ]]; then
-      if ! "${ssh_command[@]}" "$remote_target" \
-        "test -f '$client_project_root/$motion'"; then
+      remote_motion="$client_project_root/$motion"
+      if motion_requires_sync "$motion"; then
+        local_motion="$server_project_root/$motion"
+        remote_motion_directory="${remote_motion%/*}"
+        if [[ ! -r "$local_motion" ]]; then
+          echo "Motion file is unavailable: $local_motion" >&2
+          exit 8
+        fi
+        "${ssh_command[@]}" "$remote_target" "mkdir -p -- '$remote_motion_directory'"
+        rsync -av --protect-args -e "$rsync_shell" \
+          "$local_motion" "$remote_target:$remote_motion"
+
+        local_motion_sha="$(sha256sum -- "$local_motion" | awk '{print $1}')"
+        remote_motion_sha="$(${ssh_command[@]} "$remote_target" \
+          "sha256sum -- '$remote_motion' | cut -d ' ' -f 1")"
+        if [[ "$local_motion_sha" != "$remote_motion_sha" ]]; then
+          echo "Motion hash mismatch: $motion" >&2
+          exit 9
+        fi
+        echo "motion_sha256=$local_motion_sha"
+        echo "motion_status=synced"
+      elif ! "${ssh_command[@]}" "$remote_target" \
+        "test -f '$remote_motion'"; then
         echo "warning=client motion missing: $motion" >&2
       fi
     fi

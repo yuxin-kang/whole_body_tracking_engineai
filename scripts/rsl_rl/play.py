@@ -111,6 +111,12 @@ parser.add_argument(
     help="Print finite-rollout tracking and per-joint error statistics.",
 )
 parser.add_argument(
+    "--debug_target",
+    type=_str2bool,
+    default=False,
+    help="Print target displacement, strike-body distance, and filtered contact force statistics.",
+)
+parser.add_argument(
     "--play_from_start",
     type=_str2bool,
     default=False,
@@ -230,6 +236,12 @@ def _print_tracking_summary(motion_command, metric_samples, target_joint_samples
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlOnPolicyRunnerCfg):
     """Play with RSL-RL agent."""
     agent_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
+    # Keep the simulator and inference runner on the device selected for this
+    # play invocation.  Training already applies this override; play must do
+    # the same so CPU smoke tests do not inherit ``cuda:0`` from agent.yaml.
+    if args_cli.device is not None:
+        env_cfg.sim.device = args_cli.device
+        agent_cfg.device = args_cli.device
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
 
     # specify directory for logging experiments
@@ -376,6 +388,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     actual_joint_samples = []
     done_count = 0
     motion_command = env.unwrapped.command_manager.get_term("motion") if args_cli.debug_tracking else None
+    target_debug = None
+    if args_cli.debug_target:
+        try:
+            target_asset = env.unwrapped.scene["target"]
+            target_sensor = env.unwrapped.scene.sensors["target_contact"]
+            robot_asset = env.unwrapped.scene["robot"]
+            strike_body_name = target_sensor.body_names[0]
+            strike_body_index = robot_asset.body_names.index(strike_body_name)
+        except (KeyError, IndexError, ValueError) as exc:
+            raise RuntimeError("--debug_target requires a registered target and target_contact sensor") from exc
+        target_debug = {
+            "target_asset": target_asset,
+            "target_sensor": target_sensor,
+            "robot_asset": robot_asset,
+            "strike_body_index": strike_body_index,
+            "strike_body_name": strike_body_name,
+            "target_positions": [],
+            "strike_positions": [],
+            "contact_forces": [],
+        }
     # simulate environment
     while simulation_app.is_running():
         # run everything in inference mode
@@ -386,6 +418,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     metric_samples.setdefault(name, []).append(values)
                 target_joint_samples.append(target_joints)
                 actual_joint_samples.append(actual_joints)
+            if target_debug is not None:
+                target_debug["target_positions"].append(
+                    target_debug["target_asset"].data.root_state_w[0, :3].detach().cpu()
+                )
+                target_debug["strike_positions"].append(
+                    target_debug["robot_asset"].data.body_pos_w[
+                        0, target_debug["strike_body_index"], :
+                    ].detach().cpu()
+                )
+                force_matrix = target_debug["target_sensor"].data.force_matrix_w
+                if force_matrix is not None:
+                    contact_force = torch.linalg.vector_norm(force_matrix[0], dim=-1).amax()
+                else:
+                    contact_force = torch.linalg.vector_norm(
+                        target_debug["target_sensor"].data.net_forces_w[0], dim=-1
+                    ).amax()
+                target_debug["contact_forces"].append(contact_force.detach().cpu())
             # agent stepping
             actions = policy(obs)
             # env stepping
@@ -406,6 +455,33 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             target_joint_samples,
             actual_joint_samples,
             done_count,
+        )
+
+    if target_debug is not None and target_debug["strike_positions"]:
+        target_positions = torch.stack(target_debug["target_positions"])
+        strike_positions = torch.stack(target_debug["strike_positions"])
+        contact_forces = torch.stack(target_debug["contact_forces"])
+        distances = torch.linalg.vector_norm(strike_positions - target_positions, dim=-1)
+        closest_frame = int(torch.argmin(distances).item())
+        peak_force_frame = int(torch.argmax(contact_forces).item())
+        target_motion = torch.linalg.vector_norm(target_positions - target_positions[0], dim=-1)
+        nonzero_force = torch.nonzero(contact_forces > 2.0, as_tuple=False).flatten()
+        first_force_frame = int(nonzero_force[0].item()) if nonzero_force.numel() else -1
+        print(
+            f"[TARGET] strike_body={target_debug['strike_body_name']} "
+            f"closest_frame={closest_frame} closest_distance={distances[closest_frame].item():.4f} "
+            f"closest_target=({target_positions[closest_frame, 0].item():.3f},"
+            f"{target_positions[closest_frame, 1].item():.3f},"
+            f"{target_positions[closest_frame, 2].item():.3f}) "
+            f"closest_strike=({strike_positions[closest_frame, 0].item():.3f},"
+            f"{strike_positions[closest_frame, 1].item():.3f},"
+            f"{strike_positions[closest_frame, 2].item():.3f}) "
+            f"first_force_frame={first_force_frame} peak_force_frame={peak_force_frame} "
+            f"peak_force={contact_forces[peak_force_frame].item():.4f} "
+            f"peak_strike=({strike_positions[peak_force_frame, 0].item():.3f},"
+            f"{strike_positions[peak_force_frame, 1].item():.3f},"
+            f"{strike_positions[peak_force_frame, 2].item():.3f}) "
+            f"target_displacement_max={target_motion.max().item():.6f}"
         )
 
     # close the simulator

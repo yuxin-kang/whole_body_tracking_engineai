@@ -46,6 +46,23 @@ class T800FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     )
 
 
+@configclass
+class T800GetUpPPORunnerCfg(T800FlatPPORunnerCfg):
+    """Longer-horizon PPO settings for the non-cyclic get-up transition."""
+
+    num_steps_per_env = 48
+
+    def __post_init__(self):
+        super().__post_init__()
+        # The get-up clip is several seconds long and its useful transition
+        # signal is delayed.  A longer rollout and slower discount preserve
+        # that signal without changing the actor observation contract.
+        self.num_steps_per_env = 48
+        self.algorithm.gamma = 0.995
+        self.algorithm.lam = 0.97
+        self.algorithm.entropy_coef = 0.01
+
+
 LOW_FREQ_SCALE = 0.5
 
 

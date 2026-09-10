@@ -132,6 +132,15 @@ python scripts/rsl_rl/train.py \
   --headless
 ```
 
+### T800 Get-Up Tracking
+
+The recommended lying-to-standing task is
+`Tracking-Flat-T800-GetUp-Smooth-v0`, which uses the continuous
+`faint_prone_getup_03_t800` clip and transition-focused shaping. The original
+`Tracking-Flat-T800-GetUp-v0`/`getup1_t800` experiment is retained for comparison.
+See [the T800 get-up runbook](docs/t800_getup_tracking.md) for conversion,
+training, playback, and FK validation commands.
+
 ### Policy Evaluation
 
 - Play or validate with the following command:

@@ -1,0 +1,8 @@
+{
+  "source": "data/npz/t800_sdk_get_up/T800_prone_to_stance_sdk_clip_50hz.npz",
+  "foot_min_z_before_m": -0.14526072705933835,
+  "foot_min_z_after_m": 0.001999992850841542,
+  "max_lift_m": 0.14726072705933835,
+  "method": "Per-frame vertical translation to foot collision floor clearance of 2 mm",
+  "limitation": "Geometric replay correction only. Hand contacts, visual meshes and dynamic feasibility not validated."
+}

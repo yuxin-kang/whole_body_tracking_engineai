@@ -40,10 +40,64 @@ def motion_global_anchor_position_error_exp(env: ManagerBasedRLEnv, command_name
     return torch.exp(-error / std**2)
 
 
+def phase_motion_global_anchor_position_error_exp(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    std: float,
+    phase_start: float,
+    phase_end: float,
+) -> torch.Tensor:
+    """Track the anchor position only during a selected motion phase."""
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    reward = motion_global_anchor_position_error_exp(env=env, command_name=command_name, std=std)
+    return reward * _get_phase_window_mask(command, phase_start=phase_start, phase_end=phase_end)
+
+
+def phase_motion_anchor_height_error_exp(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    std: float,
+    phase_start: float,
+    phase_end: float,
+) -> torch.Tensor:
+    """Track only the absolute anchor height during a selected motion phase."""
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    error = torch.square(command.anchor_pos_w[:, 2] - command.robot_anchor_pos_w[:, 2])
+    reward = torch.exp(-error / std**2)
+    return reward * _get_phase_window_mask(command, phase_start=phase_start, phase_end=phase_end)
+
+
+def phase_motion_anchor_vertical_velocity_error_exp(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    std: float,
+    phase_start: float,
+    phase_end: float,
+) -> torch.Tensor:
+    """Track vertical anchor velocity without rewarding an uncontrolled jump."""
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    error = torch.square(command.anchor_lin_vel_w[:, 2] - command.robot_anchor_lin_vel_w[:, 2])
+    reward = torch.exp(-error / std**2)
+    return reward * _get_phase_window_mask(command, phase_start=phase_start, phase_end=phase_end)
+
+
 def motion_global_anchor_orientation_error_exp(env: ManagerBasedRLEnv, command_name: str, std: float) -> torch.Tensor:
     command: MotionCommand = env.command_manager.get_term(command_name)
     error = quat_error_magnitude(command.anchor_quat_w, command.robot_anchor_quat_w) ** 2
     return torch.exp(-error / std**2)
+
+
+def phase_motion_global_anchor_orientation_error_exp(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    std: float,
+    phase_start: float,
+    phase_end: float,
+) -> torch.Tensor:
+    """Track the anchor orientation only during a selected motion phase."""
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    reward = motion_global_anchor_orientation_error_exp(env=env, command_name=command_name, std=std)
+    return reward * _get_phase_window_mask(command, phase_start=phase_start, phase_end=phase_end)
 
 
 def motion_relative_body_position_error_exp(
@@ -289,6 +343,25 @@ def feet_slip_penalty(
     return torch.sum(torch.sqrt(foot_xy_speed) * contact_mask.to(foot_xy_speed.dtype), dim=-1)
 
 
+def phase_feet_slip_penalty(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    sensor_cfg: SceneEntityCfg,
+    force_threshold: float,
+    phase_start: float,
+    phase_end: float,
+) -> torch.Tensor:
+    """Penalize support-foot sliding after a dynamic motion has settled."""
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    penalty = feet_slip_penalty(
+        env=env,
+        command_name=command_name,
+        sensor_cfg=sensor_cfg,
+        force_threshold=force_threshold,
+    )
+    return penalty * _get_phase_window_mask(command, phase_start=phase_start, phase_end=phase_end)
+
+
 def action_rate_l2_by_joint_names(
     env: ManagerBasedRLEnv,
     command_name: str,
@@ -379,6 +452,25 @@ def phase_motion_global_body_linear_velocity_error_exp(
     return reward * _get_phase_window_mask(command, phase_start=phase_start, phase_end=phase_end)
 
 
+def phase_motion_global_body_angular_velocity_error_exp(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    std: float,
+    phase_start: float,
+    phase_end: float,
+    body_names: list[str] | None = None,
+) -> torch.Tensor:
+    """Track angular velocity only during a selected recovery phase."""
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    reward = motion_global_body_angular_velocity_error_exp(
+        env=env,
+        command_name=command_name,
+        std=std,
+        body_names=body_names,
+    )
+    return reward * _get_phase_window_mask(command, phase_start=phase_start, phase_end=phase_end)
+
+
 def phase_motion_global_anchor_xy_velocity_error_exp(
     env: ManagerBasedRLEnv,
     command_name: str,
@@ -430,3 +522,103 @@ def support_foot_com_distance_reward(
 
     error = torch.sum(torch.square(root_com_xy - support_pos_xy), dim=-1)
     return torch.exp(-error / std**2)
+
+
+def phase_support_foot_com_distance_reward(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    asset_cfg: SceneEntityCfg,
+    sensor_cfg: SceneEntityCfg,
+    force_threshold: float,
+    std: float,
+    phase_start: float,
+    phase_end: float,
+) -> torch.Tensor:
+    """Apply the support-foot COM reward after the roundhouse landing phase."""
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    reward = support_foot_com_distance_reward(
+        env=env,
+        asset_cfg=asset_cfg,
+        sensor_cfg=sensor_cfg,
+        force_threshold=force_threshold,
+        std=std,
+    )
+    return reward * _get_phase_window_mask(command, phase_start=phase_start, phase_end=phase_end)
+
+
+def target_contact_force_reward(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    sensor_cfg: SceneEntityCfg,
+    phase_start: float,
+    phase_end: float,
+    force_scale: float = 25.0,
+    force_threshold: float = 2.0,
+) -> torch.Tensor:
+    """Reward a controlled hit on the padded target during the strike window.
+
+    The force is deliberately squashed and phase-gated.  This keeps contact
+    as a secondary objective: the motion tracking terms still determine the
+    trajectory, while the target term only tells PPO that the intended distal
+    body actually reached the pad.
+    """
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    # Use the filtered force matrix when the sensor has a target filter.  The
+    # unfiltered ``net_forces_w`` also includes contacts with the floor or the
+    # robot itself and would not represent the target hit specifically.
+    force_matrix = contact_sensor.data.force_matrix_w
+    if force_matrix is not None:
+        forces = force_matrix[:, sensor_cfg.body_ids]
+        force_norm = torch.linalg.vector_norm(forces, dim=-1).amax(dim=(-1, -2))
+    else:
+        forces = _select_sensor_body_forces(contact_sensor.data.net_forces_w, sensor_cfg.body_ids)
+        force_norm = torch.linalg.vector_norm(forces, dim=-1).amax(dim=-1)
+    normalized_force = torch.relu(force_norm - force_threshold) / max(force_scale, 1e-6)
+    reward = torch.tanh(normalized_force)
+    return reward * _get_phase_window_mask(command, phase_start=phase_start, phase_end=phase_end)
+
+
+def phase_recovery_stability_reward(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    phase_start: float,
+    phase_end: float,
+    asset_cfg: SceneEntityCfg,
+    minimum_height: float = 0.65,
+    height_margin: float = 0.10,
+    angular_velocity_scale: float = 2.5,
+) -> torch.Tensor:
+    """Reward an upright, high, low-spin body only after a kick settles."""
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    asset: Articulation = env.scene[asset_cfg.name]
+    height_score = torch.sigmoid((asset.data.root_pos_w[:, 2] - minimum_height) / max(height_margin, 1e-6))
+    upright_score = torch.clamp(-asset.data.projected_gravity_b[:, 2], min=0.0, max=1.0)
+    angular_speed = torch.linalg.vector_norm(asset.data.root_ang_vel_w, dim=-1)
+    angular_score = torch.exp(-angular_speed / max(angular_velocity_scale, 1e-6))
+    phase_mask = _get_phase_window_mask(command, phase_start=phase_start, phase_end=phase_end)
+    return height_score * upright_score * angular_score * phase_mask
+
+
+def target_recovery_stability_reward(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    phase_start: float,
+    asset_cfg: SceneEntityCfg,
+    minimum_height: float = 0.4,
+    height_margin: float = 0.08,
+    angular_velocity_scale: float = 3.0,
+) -> torch.Tensor:
+    """Encourage upright, low-spin recovery after the target contact window."""
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    asset: Articulation = env.scene[asset_cfg.name]
+    height_score = torch.sigmoid((asset.data.root_pos_w[:, 2] - minimum_height) / max(height_margin, 1e-6))
+    upright_score = torch.clamp(-asset.data.projected_gravity_b[:, 2], min=0.0, max=1.0)
+    angular_speed = torch.linalg.vector_norm(asset.data.root_ang_vel_w, dim=-1)
+    angular_score = torch.exp(-angular_speed / max(angular_velocity_scale, 1e-6))
+    phase_mask = _get_phase_window_mask(
+        command,
+        phase_start=phase_start,
+        phase_end=1.0,
+    )
+    return height_score * upright_score * angular_score * phase_mask

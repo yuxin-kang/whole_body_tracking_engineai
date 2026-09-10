@@ -18,11 +18,29 @@ from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
+
+def _str2bool(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    lowered = value.lower()
+    if lowered in {"true", "1", "yes", "y", "on"}:
+        return True
+    if lowered in {"false", "0", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
+
+
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Replay converted motions.")
 parser.add_argument("--registry_name", type=str, default=None, help="The name of the wandb registry.")
 parser.add_argument("--input_file", type=str, default=None, help="Path to a local .npz motion file.")
 parser.add_argument("--robot", type=str, default="t800", choices=["pm01", "t800", "g1"], help="Robot type to use.")
+parser.add_argument(
+    "--follow_camera",
+    type=_str2bool,
+    default=False,
+    help="Continuously lock the viewer to the robot; by default the nearby camera remains freely movable.",
+)
 parser.add_argument(
     "--report_540_landmarks_only",
     action="store_true",
@@ -126,6 +144,14 @@ ROBOT_MOTION_JOINT_NAMES = {
 }
 
 
+def _configure_replay_camera(sim: sim_utils.SimulationContext, follow_camera: bool) -> None:
+    """Keep the default replay camera static so the user can orbit freely."""
+    if follow_camera:
+        return
+    sim.set_camera_view(np.array([-1.8, -1.8, 1.6]), np.array([0.0, 0.0, 0.8]))
+    print("[INFO] Free replay camera enabled; use --follow_camera true to track the robot.")
+
+
 @configclass
 class ReplayMotionsSceneCfg(InteractiveSceneCfg):
     """Configuration for a replay motions scene."""
@@ -184,6 +210,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     robot: Articulation = scene["robot"]
     # Define simulation stepping
     sim_dt = sim.get_physics_dt()
+    _configure_replay_camera(sim, follow_camera=args_cli.follow_camera)
 
     if args_cli.input_file is not None:
         motion_file = args_cli.input_file
@@ -272,8 +299,9 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         sim.render()  # We don't want physic (sim.step())
         scene.update(sim_dt)
 
-        pos_lookat = root_states[0, :3].cpu().numpy()
-        sim.set_camera_view(pos_lookat + np.array([-2.0, -2.0, 0.5]), pos_lookat)
+        if args_cli.follow_camera:
+            pos_lookat = root_states[0, :3].cpu().numpy()
+            sim.set_camera_view(pos_lookat + np.array([-2.0, -2.0, 0.5]), pos_lookat)
 
 
 def main():

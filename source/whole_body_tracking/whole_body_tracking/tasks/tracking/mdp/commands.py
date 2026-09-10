@@ -720,6 +720,10 @@ class MotionCommand(CommandTerm):
 
         joint_pos = self.joint_pos[env_ids].clone()
         joint_vel = self.joint_vel[env_ids].clone()
+        if self.cfg.joint_position_scale_range != (1.0, 1.0):
+            joint_pos *= sample_uniform(*self.cfg.joint_position_scale_range, joint_pos.shape, joint_pos.device)
+        if self.cfg.joint_velocity_range != (0.0, 0.0):
+            joint_vel += sample_uniform(*self.cfg.joint_velocity_range, joint_vel.shape, joint_vel.device)
         joint_pos += sample_uniform(*self.cfg.joint_position_range, joint_pos.shape, joint_pos.device)
 
         if self.robot_joint_indexes is None:
@@ -933,6 +937,10 @@ class MotionStandingCommand(MotionCommand):
 
         joint_pos = self.joint_pos[env_ids].clone()
         joint_vel = self.joint_vel[env_ids].clone()
+        if self.cfg.joint_position_scale_range != (1.0, 1.0):
+            joint_pos *= sample_uniform(*self.cfg.joint_position_scale_range, joint_pos.shape, joint_pos.device)
+        if self.cfg.joint_velocity_range != (0.0, 0.0):
+            joint_vel += sample_uniform(*self.cfg.joint_velocity_range, joint_vel.shape, joint_vel.device)
         joint_pos += sample_uniform(*self.cfg.joint_position_range, joint_pos.shape, joint_pos.device)
 
         standing_root_xyzw, standing_joint_pos, standing_joint_vel = self._sample_standing_init(len(env_ids))
@@ -1009,6 +1017,9 @@ class MotionCommandCfg(CommandTermCfg):
     feet_body_names: list[str] = []
 
     pose_range: dict[str, tuple[float, float]] = {}
+    # Optional reference-relative reset noise; defaults preserve other tasks.
+    joint_position_scale_range: tuple[float, float] = (1.0, 1.0)
+    joint_velocity_range: tuple[float, float] = (0.0, 0.0)
     velocity_range: dict[str, tuple[float, float]] = {}
 
     joint_position_range: tuple[float, float] = (-0.52, 0.52)

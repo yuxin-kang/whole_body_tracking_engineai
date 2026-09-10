@@ -1,5 +1,6 @@
 import os
 import tempfile
+import xml.etree.ElementTree as ET
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
@@ -64,6 +65,106 @@ DAMPING_Q25H = 0.3
 
 T800_URDF_PATH = os.path.join(ASSET_DIR, "t800", "urdf", "serial_t800.urdf")
 T800_USD_DIR = os.path.join(tempfile.gettempdir(), "IsaacLab", "t800")
+
+# Collision primitives from engineai_robotics_native_sdk/assets/resource/t800.xml
+# (MuJoCo 3.2.3).  MuJoCo cylinders are Z-axis primitives; ``length`` below is
+# their full length.  The SDK's fixed foot bodies are identity children of the
+# ankle-roll links, so their three primitives belong on the ankle-roll links in
+# the URDF as well (rather than on this URDF's offset fixed FOOT links).
+MUJOCO_COLLISION_PROFILE_VERSION = "engineai-sdk-t800-mujoco-3.2.3-v1"
+_MUJOCO_COLLISION_PRIMITIVES = {
+    "LINK_BASE": (("sphere", "-0.01 0 0.01", "0 0 0", "0.09"),),
+    "LINK_HIP_PITCH_L": (("cylinder", "0 0.04 -0.10", "0 1.5707963267948966 0", "0.062 0.16"),),
+    "LINK_HIP_PITCH_R": (("cylinder", "0 -0.04 -0.10", "0 1.5707963267948966 0", "0.062 0.16"),),
+    "LINK_HIP_YAW_L": (("box", "0 0.002 -0.10", "0 0 0", "0.12 0.12 0.22"),),
+    "LINK_HIP_YAW_R": (("box", "0 -0.002 -0.10", "0 0 0", "0.12 0.12 0.22"),),
+    "LINK_KNEE_PITCH_L": (
+        ("sphere", "0 0 0", "0 0 0", "0.08"),
+        ("box", "-0.02 0 -0.25", "0 0 0", "0.10 0.10 0.28"),
+    ),
+    "LINK_KNEE_PITCH_R": (
+        ("sphere", "0 0 0", "0 0 0", "0.08"),
+        ("box", "-0.02 0 -0.25", "0 0 0", "0.10 0.10 0.28"),
+    ),
+    "LINK_ANKLE_ROLL_L": (
+        ("box", "0.1 0.00166 -0.054", "0 0 0", "0.114 0.11 0.02"),
+        ("box", "-0.053 0.00166 -0.054", "0 0 0", "0.06 0.10 0.02"),
+        ("box", "-0.092 0.00166 -0.045", "0 0.592879010508 0", "0.036 0.10 0.02"),
+    ),
+    "LINK_ANKLE_ROLL_R": (
+        ("box", "0.1 -0.00166 -0.054", "0 0 0", "0.114 0.11 0.02"),
+        ("box", "-0.053 -0.00166 -0.054", "0 0 0", "0.06 0.10 0.02"),
+        ("box", "-0.092 -0.00166 -0.045", "0 0.592879010508 0", "0.036 0.10 0.02"),
+    ),
+    # MuJoCo calls this LINK_WAIST_YAW; the Isaac training URDF calls it
+    # LINK_TORSO_YAW.  It is the same kinematic link.
+    "LINK_TORSO_YAW": (
+        ("box", "-0.007 -0.001 0.075", "0 0 0", "0.18 0.20 0.14"),
+        ("box", "-0.007 -0.001 0.25", "0 0 0", "0.22 0.28 0.19"),
+    ),
+    "LINK_SHOULDER_ROLL_L": (("cylinder", "0 0 0", "0 1.5707963267948966 0", "0.042 0.12"),),
+    "LINK_SHOULDER_ROLL_R": (("cylinder", "0 0 0", "0 1.5707963267948966 0", "0.042 0.12"),),
+    "LINK_SHOULDER_YAW_L": (("cylinder", "0 0 -0.04", "0 0 0", "0.042 0.12"),),
+    "LINK_SHOULDER_YAW_R": (("cylinder", "0 0 -0.04", "0 0 0", "0.042 0.12"),),
+    "LINK_ELBOW_PITCH_L": (("sphere", "0 0 0", "0 0 0", "0.05"),),
+    "LINK_ELBOW_PITCH_R": (("sphere", "0 0 0", "0 0 0", "0.05"),),
+    "LINK_ELBOW_YAW_L": (("box", "0.014 0.005 -0.05", "-0.000897139264503 -0.175544008532 0.261733738702", "0.07 0.07 0.16"),),
+    "LINK_ELBOW_YAW_R": (("box", "0.014 -0.005 -0.05", "0.000897139264503 -0.175544008532 -0.261733738702", "0.07 0.07 0.16"),),
+    "LINK_WRIST_END_L": (("sphere", "0.026 -0.009 -0.06", "0 0 0", "0.05"),),
+    "LINK_WRIST_END_R": (("sphere", "0.026 0.009 -0.06", "0 0 0", "0.05"),),
+    "LINK_HEAD_YAW": (("sphere", "0.018 0 0.08", "0 0 0", "0.09"),),
+}
+
+
+def _make_mujoco_collision_urdf() -> str:
+    """Materialize a URDF whose collision primitives match the native SDK.
+
+    Visual meshes, inertials, joint axes/limits and all non-collision fields
+    remain the ordinary Isaac training URDF.  Atomic replacement is necessary
+    because two Slurm steps can begin importing the asset concurrently.
+    """
+    output_dir = os.path.join(tempfile.gettempdir(), "IsaacLab", "t800_mujoco_collision")
+    output_path = os.path.join(output_dir, f"serial_t800_{MUJOCO_COLLISION_PROFILE_VERSION}.urdf")
+    if os.path.isfile(output_path):
+        return output_path
+
+    root = ET.parse(T800_URDF_PATH).getroot()
+    links = {link.attrib["name"]: link for link in root.findall("link")}
+    if set(_MUJOCO_COLLISION_PRIMITIVES) - set(links):
+        raise RuntimeError("MuJoCo collision profile refers to a missing T800 URDF link")
+    for link in links.values():
+        for collision in tuple(link.findall("collision")):
+            link.remove(collision)
+    for link_name, primitives in _MUJOCO_COLLISION_PRIMITIVES.items():
+        link = links[link_name]
+        for primitive_type, xyz, rpy, dimensions in primitives:
+            collision = ET.SubElement(link, "collision")
+            ET.SubElement(collision, "origin", xyz=xyz, rpy=rpy)
+            geometry = ET.SubElement(collision, "geometry")
+            if primitive_type == "box":
+                ET.SubElement(geometry, "box", size=dimensions)
+            elif primitive_type == "sphere":
+                ET.SubElement(geometry, "sphere", radius=dimensions)
+            elif primitive_type == "cylinder":
+                radius, length = dimensions.split()
+                ET.SubElement(geometry, "cylinder", radius=radius, length=length)
+            else:
+                raise RuntimeError(f"Unsupported MuJoCo collision primitive: {primitive_type}")
+
+    os.makedirs(output_dir, exist_ok=True)
+    fd, temporary_path = tempfile.mkstemp(prefix=".serial_t800_", suffix=".urdf", dir=output_dir)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            ET.ElementTree(root).write(stream, encoding="utf-8", xml_declaration=True)
+        os.replace(temporary_path, output_path)
+    except BaseException:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+        raise
+    return output_path
+
+
+T800_MUJOCO_COLLISION_URDF_PATH = _make_mujoco_collision_urdf()
 
 T800_CFG = ArticulationCfg(
     spawn=sim_utils.UrdfFileCfg(
@@ -327,6 +428,12 @@ T800_CFG = ArticulationCfg(
             },
         ),
     },
+)
+
+# Keep the regular T800 task on the original training collision profile.  This
+# alternate asset is selected only by the dedicated MuJoCo-aligned get-up task.
+T800_MUJOCO_COLLISION_CFG = T800_CFG.replace(
+    spawn=T800_CFG.spawn.replace(asset_path=T800_MUJOCO_COLLISION_URDF_PATH)
 )
 
 

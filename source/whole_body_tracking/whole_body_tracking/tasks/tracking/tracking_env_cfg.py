@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import MISSING
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import ArticulationCfg, AssetBaseCfg
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -71,6 +71,10 @@ class MySceneCfg(InteractiveSceneCfg):
     contact_forces = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True, force_threshold=10.0, debug_vis=True
     )
+    # Optional target-pad entities.  They remain disabled for the original
+    # tracking tasks and are populated only by the target-training variants.
+    target: RigidObjectCfg | None = None
+    target_contact: ContactSensorCfg | None = None
 
 
 ##
@@ -140,6 +144,7 @@ class ObservationsCfg:
         joint_pos = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel = ObsTerm(func=mdp.joint_vel_rel)
         actions = ObsTerm(func=mdp.last_action)
+        target_pos_b: ObsTerm | None = None
 
     # observation groups
     policy: PolicyCfg = PolicyCfg()
@@ -189,6 +194,7 @@ class EventCfg:
         interval_range_s=(5.0, 10.0),  # paper-aligned push interval (was (1.0, 3.0))
         params={"velocity_range": VELOCITY_RANGE},
     )
+    reset_target: EventTerm | None = None
 
 
 @configclass
@@ -244,6 +250,8 @@ class RewardsCfg:
             "threshold": 1.0,
         },
     )
+    target_contact: RewTerm | None = None
+    target_recovery: RewTerm | None = None
 
 
 @configclass

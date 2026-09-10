@@ -53,6 +53,8 @@ _build
 !data/npz/traj_eng_50hz_episode_complete/
 !data/npz/traj_eng_50hz_episode_complete/left_front_kick_002_terminal_hold_1s.npz
 !data/npz/traj_eng_50hz_episode_complete/roundhouse_kick_001_terminal_hold_1s.npz
+!data/npz/t800_get_up/
+!data/npz/t800_get_up/*.npz
 !tests/test_540_kick_phase_landmarks.py
 !tests/test_540_phase_curriculum_momentum_variants.py
 !tests/test_540_start0_single_episode.py
@@ -61,6 +63,13 @@ _build
 !tests/test_t800_improved_actions.py
 !tests/test_play_free_camera.py
 !tests/test_g1_kungfu_1307_config.py
+!tests/test_t800_getup_tracking.py
+!tests/test_getup_recovery_rewards.py
+!tests/test_getup_finetune.py
+!tests/test_getup_scratch.py
+!tests/test_getup_aggressive_rewards.py
+!tests/test_getup_aggressive_commands.py
+!tests/test_getup_forearm_support.py
 .omx/
 **/exp/*
 **/slurm_logs/*

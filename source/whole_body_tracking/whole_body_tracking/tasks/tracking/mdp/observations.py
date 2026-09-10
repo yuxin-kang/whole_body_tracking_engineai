@@ -81,3 +81,28 @@ def motion_anchor_ori_b(env: ManagerBasedEnv, command_name: str) -> torch.Tensor
     )
     mat = matrix_from_quat(ori)
     return mat[..., :2].reshape(mat.shape[0], -1)
+
+
+def target_position_b(
+    env: ManagerBasedEnv,
+    asset_name: str = "target",
+    command_name: str = "motion",
+) -> torch.Tensor:
+    """Return the padded target center in the robot anchor frame.
+
+    This is a privileged (critic-side) term for the first target tasks.  The
+    target is fixed relative to the zero-phase motion, so the actor keeps the
+    existing tracking observation contract while the critic observes target
+    displacement and post-impact motion.
+    """
+    command: MotionCommand = env.command_manager.get_term(command_name)
+    target = env.scene[asset_name]
+    target_pos_w = target.data.root_state_w[:, :3]
+    target_quat_w = target.data.root_state_w[:, 3:7]
+    target_pos_b, _ = subtract_frame_transforms(
+        command.robot_anchor_pos_w,
+        command.robot_anchor_quat_w,
+        target_pos_w,
+        target_quat_w,
+    )
+    return target_pos_b.view(env.num_envs, -1)
